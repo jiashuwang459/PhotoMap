@@ -23,4 +23,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 photomap-core = { path = "../photomap-core" }
+tauri-plugin-dialog = "2"
 

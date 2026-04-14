@@ -1,6 +1,6 @@
-use std::sync::Mutex;
-use std::path::Path;
 use rusqlite::Connection;
+use std::path::Path;
+use std::sync::Mutex;
 use tauri::State;
 
 use photomap_core::{
@@ -33,10 +33,7 @@ pub struct DbState(pub Mutex<Connection>);
 /// # Errors
 /// Returns a string representation of the database error on failure.
 #[tauri::command]
-pub fn cmd_upsert_photo(
-    state: State<'_, DbState>,
-    photo: InsertPhoto,
-) -> Result<i64, DbError> {
+pub fn cmd_upsert_photo(state: State<'_, DbState>, photo: InsertPhoto) -> Result<i64, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
     upsert_photo(&conn, &photo)
 }
@@ -84,11 +81,9 @@ pub fn cmd_query_by_bounding_box(
 /// or a fatal I/O or database error occurs.  Per-file errors are collected
 /// inside the returned [`ScanReport`] and do not abort the scan.
 #[tauri::command]
-pub fn cmd_scan_directory(
-    state: State<'_, DbState>,
-    dir: String,
-) -> Result<ScanReport, ScanError> {
+pub fn cmd_scan_directory(state: State<'_, DbState>, dir: String) -> Result<ScanReport, ScanError> {
     let conn = state.0.lock().expect("db mutex poisoned");
+    println!("Scanning directory: {}", dir);
     scan_directory(&conn, Path::new(&dir))
 }
 
@@ -99,10 +94,7 @@ pub fn cmd_scan_directory(
 /// # Errors
 /// Returns a string representation of the database error on failure.
 #[tauri::command]
-pub fn cmd_delete_photo(
-    state: State<'_, DbState>,
-    file_path: String,
-) -> Result<bool, DbError> {
+pub fn cmd_delete_photo(state: State<'_, DbState>, file_path: String) -> Result<bool, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
     delete_photo_by_path(&conn, &file_path)
 }
@@ -113,10 +105,7 @@ pub fn cmd_delete_photo(
 /// Results are paginated.  Pass increasing `page.offset` values and stop when
 /// the returned slice is shorter than `page.limit`.
 #[tauri::command]
-pub fn cmd_query_all_photos(
-    state: State<'_, DbState>,
-    page: Page,
-) -> Result<Vec<Photo>, DbError> {
+pub fn cmd_query_all_photos(state: State<'_, DbState>, page: Page) -> Result<Vec<Photo>, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
     query_all_photos(&conn, &page)
 }

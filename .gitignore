@@ -39,5 +39,9 @@ yarn-error.log*
 .env
 .env.*
 
-/src-tauri/target/
 /target/
+/src-tauri/target/
+/src-tauri/gen/
+/dist/
+node_modules/
+.DS_Store

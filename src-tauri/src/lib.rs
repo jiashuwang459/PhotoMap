@@ -18,6 +18,7 @@ use photomap_core::db as core_db;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             // Resolve the application data directory and open (or create) the
@@ -28,8 +29,7 @@ pub fn run() {
                 .app_data_dir()
                 .expect("failed to resolve app data directory");
 
-            std::fs::create_dir_all(&data_dir)
-                .expect("failed to create app data directory");
+            std::fs::create_dir_all(&data_dir).expect("failed to create app data directory");
 
             let db_path = data_dir.join("photomap.db");
             let conn = core_db::open(db_path.to_str().expect("non-UTF-8 db path"))

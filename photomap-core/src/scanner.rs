@@ -92,7 +92,12 @@ pub struct ScanReport {
 /// been scanned: unchanged files are detected via the stored `file_hash` and
 /// skipped without re-reading EXIF data.
 pub fn scan_directory(conn: &Connection, dir: &Path) -> Result<ScanReport, ScanError> {
+    if !dir.exists() {
+        println!("Directory not found: {}", dir.display());
+        return Err(ScanError::DirectoryNotFound(dir.to_path_buf()));
+    }
     if !dir.is_dir() {
+        println!("Not a directory: {}", dir.display());
         return Err(ScanError::DirectoryNotFound(dir.to_path_buf()));
     }
 
