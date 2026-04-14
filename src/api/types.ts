@@ -13,6 +13,13 @@ export interface Photo {
   thumbnail_path: string | null;
   blur_score: number | null;
   trip_id: number | null;
+  /**
+   * SHA-256 hex digest of the file's raw bytes.
+   * Null until the background scanner has processed the file.
+   * A change in this value (for the same file_path) indicates the file was
+   * modified on disk since the last scan.
+   */
+  file_hash: string | null;
 }
 
 /** Input for inserting or upserting a photo record. */
@@ -24,6 +31,8 @@ export interface InsertPhoto {
   thumbnail_path: string | null;
   blur_score: number | null;
   trip_id: number | null;
+  /** SHA-256 hex digest of the file's raw bytes; null when not yet computed. */
+  file_hash: string | null;
 }
 
 /** Pagination parameters shared by all list queries. */

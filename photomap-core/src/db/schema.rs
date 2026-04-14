@@ -33,6 +33,11 @@
 ///    Enforced by the UNIQUE constraint on the column; SQLite implicitly
 ///    creates a unique index.  Used for idempotent upserts.
 ///
+/// 5. `idx_photos_file_hash`
+///    Covers hash-based lookups used by the background scanner to detect new,
+///    modified, and removed photos.  Partial (hash IS NOT NULL) so that rows
+///    not yet hashed don't pollute the index.
+///
 /// All indexes are created with `IF NOT EXISTS` so the migration is safe to
 /// re-run.
 
@@ -45,9 +50,16 @@ CREATE TABLE IF NOT EXISTS photos (
     longitude      REAL,                -- WGS-84 decimal degrees; nullable
     thumbnail_path TEXT,               -- Absolute path to cached thumbnail; nullable until generated
     blur_score     REAL,               -- Higher = sharper; nullable until computed
-    trip_id        INTEGER             -- FK to trips.id; nullable until grouping runs
+    trip_id        INTEGER,            -- FK to trips.id; nullable until grouping runs
+    file_hash      TEXT                -- SHA-256 hex digest of file contents; nullable until computed
 );
 ";
+
+/// ADD COLUMN migration for databases created before `file_hash` was
+/// introduced.  Applied via `add_column_if_missing` in `run_migrations`
+/// rather than directly, because `ALTER TABLE … ADD COLUMN IF NOT EXISTS`
+/// requires SQLite ≥ 3.37 and `PRAGMA table_info` is more portable.
+pub const ADD_COLUMN_FILE_HASH: (&str, &str, &str) = ("photos", "file_hash", "TEXT");
 
 /// Partial index: only rows with a valid timestamp participate in timeline queries.
 pub const CREATE_IDX_TIMESTAMP: &str = "
@@ -71,10 +83,19 @@ CREATE INDEX IF NOT EXISTS idx_photos_trip_id
     WHERE trip_id IS NOT NULL;
 ";
 
+/// Sparse hash index: only hashed photos.  Used by the scanner to look up
+/// photos by content digest (detect duplicates and modifications).
+pub const CREATE_IDX_FILE_HASH: &str = "
+CREATE INDEX IF NOT EXISTS idx_photos_file_hash
+    ON photos (file_hash)
+    WHERE file_hash IS NOT NULL;
+";
+
 /// All DDL statements in migration order.
 pub const ALL_MIGRATIONS: &[&str] = &[
     CREATE_PHOTOS_TABLE,
     CREATE_IDX_TIMESTAMP,
     CREATE_IDX_LAT_LON,
     CREATE_IDX_TRIP,
+    CREATE_IDX_FILE_HASH,
 ];

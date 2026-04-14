@@ -2,7 +2,7 @@ use rusqlite::{Connection, Result as SqlResult};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::schema::ALL_MIGRATIONS;
+use super::schema::{ALL_MIGRATIONS, ADD_COLUMN_FILE_HASH};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Error type
@@ -38,6 +38,12 @@ pub struct Photo {
     pub thumbnail_path: Option<String>,
     pub blur_score: Option<f64>,
     pub trip_id: Option<i64>,
+    /// SHA-256 hex digest of the file's raw bytes.  `None` until the
+    /// background scanner has processed the file.  The scanner compares
+    /// this value against a freshly computed digest to detect content
+    /// changes (modified files) and uses its absence to identify files
+    /// that have never been hashed (new files added since last scan).
+    pub file_hash: Option<String>,
 }
 
 /// Input for inserting / upserting a photo record.
@@ -50,6 +56,8 @@ pub struct InsertPhoto {
     pub thumbnail_path: Option<String>,
     pub blur_score: Option<f64>,
     pub trip_id: Option<i64>,
+    /// SHA-256 hex digest of the file's raw bytes; `None` when not yet computed.
+    pub file_hash: Option<String>,
 }
 
 /// Pagination cursor used by all list queries.
@@ -84,10 +92,39 @@ pub struct BoundingBox {
 
 /// Apply all DDL migrations to an open connection.
 ///
-/// This is idempotent: all statements use `IF NOT EXISTS`.
+/// This is idempotent: all `CREATE` statements use `IF NOT EXISTS`, and
+/// `ALTER TABLE … ADD COLUMN` migrations are guarded by a `PRAGMA
+/// table_info` check so they are safe to re-run on any SQLite version.
 pub fn run_migrations(conn: &Connection) -> SqlResult<()> {
     for sql in ALL_MIGRATIONS {
         conn.execute_batch(sql)?;
+    }
+    // Column additions introduced after the initial schema.  We use
+    // PRAGMA table_info rather than `ADD COLUMN IF NOT EXISTS` for
+    // compatibility with SQLite < 3.37.
+    let (table, column, type_def) = ADD_COLUMN_FILE_HASH;
+    add_column_if_missing(conn, table, column, type_def)?;
+    Ok(())
+}
+
+/// Add `column` to `table` only if it does not already exist.
+///
+/// Uses `PRAGMA table_info` which is available in all SQLite versions
+/// supported by rusqlite's bundled build.
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    type_def: &str,
+) -> SqlResult<()> {
+    let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
+    let exists: bool = conn
+        .query_row(&sql, rusqlite::params![column], |row| row.get::<_, i64>(0))
+        .map(|n| n > 0)?;
+    if !exists {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {type_def};"
+        ))?;
     }
     Ok(())
 }
@@ -128,15 +165,16 @@ pub fn upsert_photo(conn: &Connection, photo: &InsertPhoto) -> Result<i64, DbErr
     let mut stmt = conn.prepare_cached(
         "INSERT INTO photos (
              file_path, timestamp, latitude, longitude,
-             thumbnail_path, blur_score, trip_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             thumbnail_path, blur_score, trip_id, file_hash
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(file_path) DO UPDATE SET
              timestamp      = excluded.timestamp,
              latitude       = excluded.latitude,
              longitude      = excluded.longitude,
              thumbnail_path = excluded.thumbnail_path,
              blur_score     = excluded.blur_score,
-             trip_id        = excluded.trip_id
+             trip_id        = excluded.trip_id,
+             file_hash      = excluded.file_hash
          RETURNING id",
     )?;
 
@@ -149,6 +187,7 @@ pub fn upsert_photo(conn: &Connection, photo: &InsertPhoto) -> Result<i64, DbErr
             photo.thumbnail_path,
             photo.blur_score,
             photo.trip_id,
+            photo.file_hash,
         ],
         |row| row.get(0),
     )?;
@@ -174,7 +213,7 @@ pub fn query_by_time_range(
 ) -> Result<Vec<Photo>, DbError> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, file_path, timestamp, latitude, longitude,
-                thumbnail_path, blur_score, trip_id
+                thumbnail_path, blur_score, trip_id, file_hash
          FROM   photos
          WHERE  timestamp BETWEEN ?1 AND ?2
          ORDER  BY timestamp ASC
@@ -211,7 +250,7 @@ pub fn query_by_bounding_box(
 ) -> Result<Vec<Photo>, DbError> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, file_path, timestamp, latitude, longitude,
-                thumbnail_path, blur_score, trip_id
+                thumbnail_path, blur_score, trip_id, file_hash
          FROM   photos
          WHERE  latitude  BETWEEN ?1 AND ?2
            AND  longitude BETWEEN ?3 AND ?4
@@ -250,6 +289,7 @@ fn map_row(row: &rusqlite::Row<'_>) -> SqlResult<Photo> {
         thumbnail_path: row.get(5)?,
         blur_score: row.get(6)?,
         trip_id: row.get(7)?,
+        file_hash: row.get(8)?,
     })
 }
 
@@ -276,6 +316,7 @@ mod tests {
                 thumbnail_path: None,
                 blur_score: None,
                 trip_id: None,
+                file_hash: None,
             },
         )
         .expect("upsert")
@@ -361,5 +402,89 @@ mod tests {
         insert_sample(&conn, "/photos/no_ts.jpg", None, None, None);
         let results = query_by_time_range(&conn, 0, i64::MAX, &Page { limit: 10, offset: 0 }).expect("query");
         assert_eq!(results.len(), 0);
+    }
+
+    // ── file_hash tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn file_hash_stored_and_retrieved() {
+        let conn = mem_db();
+        let hash = "abc123def456".to_string();
+        upsert_photo(
+            &conn,
+            &InsertPhoto {
+                file_path: "/photos/hashed.jpg".to_string(),
+                timestamp: Some(1_000),
+                latitude: None,
+                longitude: None,
+                thumbnail_path: None,
+                blur_score: None,
+                trip_id: None,
+                file_hash: Some(hash.clone()),
+            },
+        )
+        .expect("upsert");
+
+        let results = query_by_time_range(&conn, 1_000, 1_000, &Page { limit: 10, offset: 0 })
+            .expect("query");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_hash, Some(hash));
+    }
+
+    #[test]
+    fn file_hash_updated_on_upsert_detects_modification() {
+        let conn = mem_db();
+        let path = "/photos/changed.jpg";
+        let original_hash = "aaaa".to_string();
+        let new_hash = "bbbb".to_string();
+
+        // Initial insert with original hash.
+        upsert_photo(
+            &conn,
+            &InsertPhoto {
+                file_path: path.to_string(),
+                timestamp: Some(500),
+                latitude: None,
+                longitude: None,
+                thumbnail_path: None,
+                blur_score: None,
+                trip_id: None,
+                file_hash: Some(original_hash),
+            },
+        )
+        .expect("upsert");
+
+        // Re-scan: same path, different hash (file was modified on disk).
+        upsert_photo(
+            &conn,
+            &InsertPhoto {
+                file_path: path.to_string(),
+                timestamp: Some(600),
+                latitude: None,
+                longitude: None,
+                thumbnail_path: None,
+                blur_score: None,
+                trip_id: None,
+                file_hash: Some(new_hash.clone()),
+            },
+        )
+        .expect("upsert");
+
+        let results = query_by_time_range(&conn, 600, 600, &Page { limit: 10, offset: 0 })
+            .expect("query");
+        assert_eq!(results.len(), 1);
+        // The stored hash reflects the most recent scan.
+        assert_eq!(results[0].file_hash, Some(new_hash));
+    }
+
+    #[test]
+    fn file_hash_null_for_unprocessed_photos() {
+        let conn = mem_db();
+        insert_sample(&conn, "/photos/pending.jpg", Some(100), None, None);
+
+        let results = query_by_time_range(&conn, 100, 100, &Page { limit: 10, offset: 0 })
+            .expect("query");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_hash, None);
     }
 }
