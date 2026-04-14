@@ -9,7 +9,39 @@ interface TauriFile extends File {
   path?: string;
 }
 
-const THUMB_BATCH_SIZE = 20;
+/** Number of thumbnails to generate per backend call. Kept small to avoid
+ *  blocking the UI thread for a long stretch on each batch. */
+const THUMB_BATCH_SIZE = 5;
+
+/** Milliseconds to yield to the UI between thumbnail batches. */
+const THUMB_BATCH_DELAY_MS = 200;
+
+// ── Recent directories (persisted to localStorage) ────────────────────────────
+
+const RECENT_DIRS_KEY = "photomap_recent_dirs";
+const MAX_RECENT_DIRS = 8;
+
+function loadRecentDirs(): string[] {
+  try {
+    const stored = localStorage.getItem(RECENT_DIRS_KEY);
+    return stored ? (JSON.parse(stored) as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentDir(dir: string): string[] {
+  const next = [dir, ...loadRecentDirs().filter((d) => d !== dir)].slice(
+    0,
+    MAX_RECENT_DIRS
+  );
+  try {
+    localStorage.setItem(RECENT_DIRS_KEY, JSON.stringify(next));
+  } catch {
+    /* storage full — ignore */
+  }
+  return next;
+}
 
 export function ScanPanel() {
   const [dir, setDir] = useState("");
@@ -18,12 +50,17 @@ export function ScanPanel() {
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
 
+  /** Recently scanned directories loaded from localStorage on mount. */
+  const [recentDirs, setRecentDirs] = useState<string[]>(() => loadRecentDirs());
+
   // Thumbnail generation state
   const [thumbRunning, setThumbRunning] = useState(false);
   const [thumbReport, setThumbReport] = useState<ThumbnailBatchReport | null>(null);
   const [thumbError, setThumbError] = useState<string | null>(null);
   const [thumbTotal, setThumbTotal] = useState(0);
   const [thumbDone, setThumbDone] = useState(0);
+  /** Short status message shown during thumbnail generation. */
+  const [thumbStatus, setThumbStatus] = useState("");
 
   async function handleScan(path?: string) {
     const trimmed = (path ?? dir).trim();
@@ -34,6 +71,8 @@ export function ScanPanel() {
     try {
       const result = await scanDirectory(trimmed);
       setReport(result);
+      // Persist the directory so it appears in "Recently scanned".
+      setRecentDirs(saveRecentDir(trimmed));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -58,6 +97,7 @@ export function ScanPanel() {
     setThumbError(null);
     setThumbTotal(0);
     setThumbDone(0);
+    setThumbStatus("Starting…");
 
     try {
       // First call gives us the initial "remaining" to show overall progress.
@@ -66,14 +106,19 @@ export function ScanPanel() {
       setThumbTotal(initial);
       setThumbDone(lastReport.processed);
 
-      // Keep batching until nothing is left.
+      // Keep batching until nothing is left, yielding between each batch so
+      // the UI stays responsive and CPU spikes are smoothed out.
       while (lastReport.remaining > 0) {
+        setThumbStatus(`Processing… (${lastReport.remaining} remaining)`);
+        await new Promise<void>((resolve) => setTimeout(resolve, THUMB_BATCH_DELAY_MS));
         lastReport = await generateThumbnailsBatch(THUMB_BATCH_SIZE);
         setThumbDone((prev) => prev + lastReport.processed);
       }
       setThumbReport(lastReport);
+      setThumbStatus("");
     } catch (e) {
       setThumbError(String(e));
+      setThumbStatus("");
     } finally {
       setThumbRunning(false);
     }
@@ -154,6 +199,27 @@ export function ScanPanel() {
         </button>
       </div>
 
+      {/* ── Recently scanned directories ── */}
+      {recentDirs.length > 0 && (
+        <div className="recent-dirs">
+          <h3 className="recent-dirs-title">Recently scanned</h3>
+          <ul className="recent-dirs-list">
+            {recentDirs.map((d) => (
+              <li key={d}>
+                <button
+                  className="recent-dir-btn"
+                  onClick={() => { setDir(d); void handleScan(d); }}
+                  disabled={scanning}
+                  title={d}
+                >
+                  📁 {d}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {error && (
         <div className="scan-error" role="alert">
           <strong>Error:</strong> {error}
@@ -211,14 +277,16 @@ export function ScanPanel() {
           {thumbRunning ? "Generating…" : "Generate thumbnails"}
         </button>
 
-        {thumbRunning && thumbTotal > 0 && (
+        {thumbRunning && (
           <div className="thumb-progress">
             <div
               className="thumb-progress-bar"
-              style={{ width: `${thumbPercent}%` }}
+              style={{ width: thumbTotal > 0 ? `${thumbPercent}%` : "0%" }}
             />
             <span className="thumb-progress-label">
-              {thumbDone} / {thumbTotal} ({thumbPercent}%)
+              {thumbTotal > 0
+                ? `${thumbDone} / ${thumbTotal} (${thumbPercent}%) — ${thumbStatus}`
+                : thumbStatus}
             </span>
           </div>
         )}
