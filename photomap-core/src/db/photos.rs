@@ -276,8 +276,79 @@ pub fn query_by_bounding_box(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Internal helpers
+// Reads — lookup by path
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Return the photo record for a given absolute file path, or `None` if it
+/// has not been indexed yet.
+pub fn get_photo_by_path(conn: &Connection, file_path: &str) -> Result<Option<Photo>, DbError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, file_path, timestamp, latitude, longitude,
+                thumbnail_path, blur_score, trip_id, file_hash
+         FROM   photos
+         WHERE  file_path = ?1
+         LIMIT  1",
+    )?;
+
+    let mut rows = stmt.query_map(rusqlite::params![file_path], map_row)?;
+    match rows.next() {
+        Some(row) => Ok(Some(row?)),
+        None => Ok(None),
+    }
+}
+
+/// Return all indexed photos whose `file_path` starts with `prefix`
+/// (i.e. lives under a given directory), ordered by file_path.
+///
+/// Useful for the scanner to discover records that may need to be removed
+/// when their corresponding files have been deleted from disk.
+pub fn list_photos_by_path_prefix(
+    conn: &Connection,
+    prefix: &str,
+    page: &Page,
+) -> Result<Vec<Photo>, DbError> {
+    // Append a trailing '/' to the prefix so that "/photos2" does not match
+    // "/photos20/..." when the caller intended "/photos2/...".
+    let like_pattern = format!(
+        "{}{}%",
+        prefix.trim_end_matches('/'),
+        '/'
+    );
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, file_path, timestamp, latitude, longitude,
+                thumbnail_path, blur_score, trip_id, file_hash
+         FROM   photos
+         WHERE  file_path LIKE ?1 ESCAPE '\\'
+         ORDER  BY file_path ASC
+         LIMIT  ?2 OFFSET ?3",
+    )?;
+
+    let photos = stmt
+        .query_map(
+            rusqlite::params![like_pattern, page.clamped_limit(), page.offset],
+            map_row,
+        )?
+        .collect::<SqlResult<Vec<_>>>()?;
+
+    Ok(photos)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Writes — deletion
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Delete the photo record with the given `file_path`.
+///
+/// Returns `true` if a row was deleted, `false` if no such row existed.
+pub fn delete_photo_by_path(conn: &Connection, file_path: &str) -> Result<bool, DbError> {
+    let n = conn.execute(
+        "DELETE FROM photos WHERE file_path = ?1",
+        rusqlite::params![file_path],
+    )?;
+    Ok(n > 0)
+}
+
+
 
 fn map_row(row: &rusqlite::Row<'_>) -> SqlResult<Photo> {
     Ok(Photo {

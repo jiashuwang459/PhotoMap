@@ -8,3 +8,9 @@ description = "Database layer and domain logic for PhotoMap"
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
+sha2 = "0.11"
+walkdir = "2.5"
+kamadak-exif = "0.6"
+
+[dev-dependencies]
+tempfile = "3.27"

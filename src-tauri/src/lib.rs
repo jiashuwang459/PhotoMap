@@ -4,7 +4,11 @@ pub mod db;
 use std::sync::Mutex;
 use tauri::Manager;
 
-use commands::{DbState, cmd_upsert_photo, cmd_query_by_time_range, cmd_query_by_bounding_box};
+use commands::{
+    DbState,
+    cmd_upsert_photo, cmd_query_by_time_range, cmd_query_by_bounding_box,
+    cmd_scan_directory, cmd_delete_photo,
+};
 use photomap_core::db as core_db;
 
 /// Build and return the Tauri application.
@@ -38,6 +42,8 @@ pub fn run() {
             cmd_upsert_photo,
             cmd_query_by_time_range,
             cmd_query_by_bounding_box,
+            cmd_scan_directory,
+            cmd_delete_photo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

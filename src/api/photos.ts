@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BoundingBox, InsertPhoto, Page, Photo } from "./types";
+import type { BoundingBox, InsertPhoto, Page, Photo, ScanReport } from "./types";
 
 /**
  * Insert or update a photo record in the database.
@@ -43,4 +43,27 @@ export async function queryByBoundingBox(
   page: Page
 ): Promise<Photo[]> {
   return invoke<Photo[]>("cmd_query_by_bounding_box", { bbox, page });
+}
+
+/**
+ * Scan a directory recursively for image files, synchronising the database:
+ * - New files are inserted.
+ * - Modified files (hash changed) are updated.
+ * - Records for deleted files are removed.
+ *
+ * @param dir Absolute path to the directory to scan.
+ * @returns A {@link ScanReport} summarising what was added, updated, removed,
+ *          and any per-file errors.
+ */
+export async function scanDirectory(dir: string): Promise<ScanReport> {
+  return invoke<ScanReport>("cmd_scan_directory", { dir });
+}
+
+/**
+ * Delete the photo record with the given absolute `filePath`.
+ *
+ * @returns `true` if a record was deleted, `false` if no such record existed.
+ */
+export async function deletePhoto(filePath: string): Promise<boolean> {
+  return invoke<boolean>("cmd_delete_photo", { filePath });
 }

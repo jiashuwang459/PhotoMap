@@ -50,3 +50,25 @@ export interface BoundingBox {
   min_lon: number;
   max_lon: number;
 }
+
+/** A per-file error recorded inside {@link ScanReport}. */
+export interface ScanEntryError {
+  /** Absolute path of the file that caused the error. */
+  file_path: string;
+  /** Human-readable description of the error. */
+  message: string;
+}
+
+/** Summary returned by {@link scanDirectory}. */
+export interface ScanReport {
+  /** Files inserted into the database (first time seen). */
+  added: number;
+  /** Files updated in the database (hash changed since last scan). */
+  updated: number;
+  /** Database records removed (file deleted from disk). */
+  removed: number;
+  /** Files skipped because the hash was unchanged. */
+  unchanged: number;
+  /** Per-file errors that did not abort the scan. */
+  errors: ScanEntryError[];
+}
