@@ -2,7 +2,7 @@ use rusqlite::{Connection, Result as SqlResult};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::schema::{ALL_MIGRATIONS, ADD_COLUMN_FILE_HASH};
+use super::schema::{ALL_MIGRATIONS, ADD_COLUMN_FILE_HASH, ADD_COLUMN_TRIPS_IS_CONFIRMED};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Error type
@@ -103,6 +103,8 @@ pub fn run_migrations(conn: &Connection) -> SqlResult<()> {
     // PRAGMA table_info rather than `ADD COLUMN IF NOT EXISTS` for
     // compatibility with SQLite < 3.37.
     let (table, column, type_def) = ADD_COLUMN_FILE_HASH;
+    add_column_if_missing(conn, table, column, type_def)?;
+    let (table, column, type_def) = ADD_COLUMN_TRIPS_IS_CONFIRMED;
     add_column_if_missing(conn, table, column, type_def)?;
     Ok(())
 }
@@ -362,17 +364,26 @@ pub fn list_photos_by_path_prefix(
 // Writes — deletion
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Delete the photo record with the given `file_path`.
+/// Delete the photo record at `file_path` and return its `thumbnail_path` (if
+/// any) so the caller can remove the thumbnail file from disk.
 ///
-/// Returns `true` if a row was deleted, `false` if no such row existed.
-pub fn delete_photo_by_path(conn: &Connection, file_path: &str) -> Result<bool, DbError> {
-    let n = conn.execute(
-        "DELETE FROM photos WHERE file_path = ?1",
-        rusqlite::params![file_path],
+/// Returns `Some(thumbnail_path)` if the photo existed (even if
+/// `thumbnail_path` was NULL — in that case the inner `Option<String>` is
+/// `None`), or `None` if no row matched `file_path`.
+pub fn delete_photo_by_path(
+    conn: &Connection,
+    file_path: &str,
+) -> Result<Option<Option<String>>, DbError> {
+    let mut stmt = conn.prepare_cached(
+        "DELETE FROM photos WHERE file_path = ?1 RETURNING thumbnail_path",
     )?;
-    Ok(n > 0)
+    let result = stmt.query_row(rusqlite::params![file_path], |row| row.get::<_, Option<String>>(0));
+    match result {
+        Ok(thumb) => Ok(Some(thumb)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(DbError::from(e)),
+    }
 }
-
 
 
 /// Map a query row to a [`Photo`].  Public so sibling modules (e.g. `trips`)

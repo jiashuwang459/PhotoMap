@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BoundingBox, InsertPhoto, Page, Photo, ScanReport, Trip } from "./types";
+import type { BoundingBox, InsertPhoto, Page, Photo, ScanReport, Trip, ThumbnailBatchReport } from "./types";
 
 /**
  * Insert or update a photo record in the database.
@@ -110,14 +110,47 @@ export async function getTrip(tripId: number): Promise<Trip | null> {
 /**
  * Create a new trip with the given name and optional time bounds.
  *
+ * @param isConfirmed Pass `true` for manually created trips.
  * @returns The id of the newly created trip.
  */
 export async function createTrip(
   name: string,
   startTs: number | null,
-  endTs: number | null
+  endTs: number | null,
+  isConfirmed: boolean
 ): Promise<number> {
-  return invoke<number>("cmd_create_trip", { name, startTs, endTs });
+  return invoke<number>("cmd_create_trip", { name, startTs, endTs, isConfirmed });
+}
+
+/**
+ * Mark the trip as confirmed (user accepted an auto-group suggestion).
+ *
+ * @returns `true` if the trip was found and updated.
+ */
+export async function confirmTrip(tripId: number): Promise<boolean> {
+  return invoke<boolean>("cmd_confirm_trip", { tripId });
+}
+
+/**
+ * Rename a trip.
+ *
+ * @returns `true` if the trip was found and renamed.
+ */
+export async function renameTrip(tripId: number, name: string): Promise<boolean> {
+  return invoke<boolean>("cmd_rename_trip", { tripId, name });
+}
+
+/**
+ * Assign or unassign a photo to/from a trip.
+ *
+ * @param tripId The trip id to assign the photo to, or `null` to unassign.
+ * @returns `true` if the photo record was found and updated.
+ */
+export async function setPhotoTrip(
+  photoId: number,
+  tripId: number | null
+): Promise<boolean> {
+  return invoke<boolean>("cmd_set_photo_trip", { photoId, tripId });
 }
 
 /**
@@ -146,6 +179,15 @@ export async function queryPhotosByTrip(
 }
 
 /**
+ * Return photos NOT assigned to any trip, ordered by timestamp ascending.
+ *
+ * Paginated.  Used to populate the "add photos" picker in the trip detail view.
+ */
+export async function queryUntrippedPhotos(page: Page): Promise<Photo[]> {
+  return invoke<Photo[]>("cmd_query_untripped_photos", { page });
+}
+
+/**
  * Cluster all timestamped photos into trips using a temporal-gap algorithm.
  *
  * A new trip is created whenever two consecutive photos (by timestamp) are
@@ -157,4 +199,19 @@ export async function queryPhotosByTrip(
  */
 export async function autoGroupTrips(gapSeconds: number): Promise<number[]> {
   return invoke<number[]>("cmd_auto_group_trips", { gapSeconds });
+}
+
+// ── Thumbnail API ─────────────────────────────────────────────────────────────
+
+/**
+ * Generate thumbnails for up to `batchSize` photos that do not yet have one.
+ *
+ * Call repeatedly until `ThumbnailBatchReport.remaining` reaches 0.
+ *
+ * @param batchSize How many photos to process in one call (default: 20).
+ */
+export async function generateThumbnailsBatch(
+  batchSize: number
+): Promise<ThumbnailBatchReport> {
+  return invoke<ThumbnailBatchReport>("cmd_generate_thumbnails_batch", { batchSize });
 }

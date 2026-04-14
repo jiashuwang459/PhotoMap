@@ -1,5 +1,6 @@
 pub mod db;
 pub mod scanner;
+pub mod thumbnail;
 
 pub use db::{
     open, run_migrations,
@@ -8,7 +9,12 @@ pub use db::{
     get_photo_by_path, delete_photo_by_path, list_photos_by_path_prefix,
     BoundingBox, DbError, InsertPhoto, Page, Photo,
     create_trip, list_trips, get_trip, delete_trip,
-    query_photos_by_trip, auto_group_trips,
+    confirm_trip, rename_trip, set_photo_trip,
+    query_photos_by_trip, query_untripped_photos, auto_group_trips,
     Trip,
 };
 pub use scanner::{scan_directory, compute_sha256, ScanError, ScanReport, ScanEntryError};
+pub use thumbnail::{
+    generate_thumbnail, generate_thumbnails_batch, thumbnail_path_for,
+    ThumbnailBatchReport, ThumbnailEntryError, ThumbnailError,
+};

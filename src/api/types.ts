@@ -63,6 +63,28 @@ export interface Trip {
   cover_photo_id: number | null;
   /** Number of photos currently assigned to this trip. */
   photo_count: number;
+  /**
+   * Whether the user has confirmed (accepted) this trip.
+   * Auto-grouped trips start as `false` (suggested); users confirm them.
+   */
+  is_confirmed: boolean;
+}
+
+/** A per-file error recorded inside {@link ThumbnailBatchReport}. */
+export interface ThumbnailEntryError {
+  photo_id: number;
+  file_path: string;
+  message: string;
+}
+
+/** Summary returned by {@link generateThumbnailsBatch}. */
+export interface ThumbnailBatchReport {
+  /** Thumbnails successfully generated in this batch. */
+  processed: number;
+  /** Photos still without a thumbnail after this batch. */
+  remaining: number;
+  /** Per-photo errors that did not abort the batch. */
+  errors: ThumbnailEntryError[];
 }
 
 /** A per-file error recorded inside {@link ScanReport}. */

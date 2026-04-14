@@ -40,6 +40,11 @@ pub struct Trip {
     pub cover_photo_id: Option<i64>,
     /// Total number of photos assigned to this trip.
     pub photo_count: i64,
+    /// Whether the user has confirmed (accepted) this trip.
+    ///
+    /// Auto-grouped trips start with `is_confirmed = false` (i.e. "suggested");
+    /// the user confirms them via [`confirm_trip`].
+    pub is_confirmed: bool,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -48,19 +53,22 @@ pub struct Trip {
 
 /// Insert a new trip record and return its generated `id`.
 ///
-/// `start_ts` and `end_ts` are Unix epoch seconds; both are optional (e.g.
-/// for manually created trips with no photos yet).
+/// `start_ts` and `end_ts` are Unix epoch seconds; both are optional.
+/// `is_confirmed` should be `true` for manually created trips and `false`
+/// for auto-grouped "suggested" trips.
 pub fn create_trip(
     conn: &Connection,
     name: &str,
     start_ts: Option<i64>,
     end_ts: Option<i64>,
+    is_confirmed: bool,
 ) -> Result<i64, DbError> {
     let mut stmt = conn.prepare_cached(
-        "INSERT INTO trips (name, start_ts, end_ts) VALUES (?1, ?2, ?3) RETURNING id",
+        "INSERT INTO trips (name, start_ts, end_ts, is_confirmed)
+         VALUES (?1, ?2, ?3, ?4) RETURNING id",
     )?;
     let id: i64 = stmt.query_row(
-        rusqlite::params![name, start_ts, end_ts],
+        rusqlite::params![name, start_ts, end_ts, is_confirmed as i64],
         |row| row.get(0),
     )?;
     Ok(id)
@@ -74,7 +82,7 @@ pub fn create_trip(
 pub fn list_trips(conn: &Connection, page: &Page) -> Result<Vec<Trip>, DbError> {
     let mut stmt = conn.prepare_cached(
         "SELECT t.id, t.name, t.start_ts, t.end_ts, t.cover_photo_id,
-                COUNT(p.id) AS photo_count
+                COUNT(p.id) AS photo_count, t.is_confirmed
          FROM   trips t
          LEFT   JOIN photos p ON p.trip_id = t.id
          GROUP  BY t.id
@@ -92,7 +100,7 @@ pub fn list_trips(conn: &Connection, page: &Page) -> Result<Vec<Trip>, DbError> 
 pub fn get_trip(conn: &Connection, trip_id: i64) -> Result<Option<Trip>, DbError> {
     let mut stmt = conn.prepare_cached(
         "SELECT t.id, t.name, t.start_ts, t.end_ts, t.cover_photo_id,
-                COUNT(p.id) AS photo_count
+                COUNT(p.id) AS photo_count, t.is_confirmed
          FROM   trips t
          LEFT   JOIN photos p ON p.trip_id = t.id
          WHERE  t.id = ?1
@@ -104,6 +112,49 @@ pub fn get_trip(conn: &Connection, trip_id: i64) -> Result<Option<Trip>, DbError
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(DbError::from(e)),
     }
+}
+
+/// Mark the trip as confirmed (user accepted the suggestion).
+///
+/// Returns `true` if the trip was found and updated, `false` if it did not
+/// exist.
+pub fn confirm_trip(conn: &Connection, trip_id: i64) -> Result<bool, DbError> {
+    let n = conn.execute(
+        "UPDATE trips SET is_confirmed = 1 WHERE id = ?1",
+        rusqlite::params![trip_id],
+    )?;
+    Ok(n > 0)
+}
+
+/// Rename a trip.
+///
+/// Returns `true` if the trip was found and renamed, `false` if it did not
+/// exist.
+pub fn rename_trip(conn: &Connection, trip_id: i64, name: &str) -> Result<bool, DbError> {
+    let n = conn.execute(
+        "UPDATE trips SET name = ?1 WHERE id = ?2",
+        rusqlite::params![name, trip_id],
+    )?;
+    Ok(n > 0)
+}
+
+/// Assign or unassign a photo to/from a trip.
+///
+/// Pass `Some(trip_id)` to add the photo to the trip, or `None` to remove it
+/// from its current trip.
+///
+/// Returns `true` if the photo record was found and updated, `false` if no
+/// such photo exists.
+pub fn set_photo_trip(
+    conn: &Connection,
+    photo_id: i64,
+    trip_id: Option<i64>,
+) -> Result<bool, DbError> {
+    let n = conn.execute(
+        "UPDATE photos SET trip_id = ?1 WHERE id = ?2",
+        rusqlite::params![trip_id, photo_id],
+    )?;
+    Ok(n > 0)
 }
 
 /// Delete the trip with the given `trip_id`.
@@ -144,6 +195,26 @@ pub fn query_photos_by_trip(
     )?;
     let rows = stmt.query_map(
         rusqlite::params![trip_id, page.clamped_limit(), page.offset],
+        super::photos::map_row_pub,
+    )?;
+    rows.collect::<SqlResult<Vec<_>>>().map_err(DbError::from)
+}
+
+/// Return photos NOT assigned to any trip, ordered by timestamp ascending then
+/// file path.  Used to populate the "add photos to trip" picker.
+///
+/// Results are paginated.
+pub fn query_untripped_photos(conn: &Connection, page: &Page) -> Result<Vec<Photo>, DbError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, file_path, timestamp, latitude, longitude,
+                thumbnail_path, blur_score, trip_id, file_hash
+         FROM   photos
+         WHERE  trip_id IS NULL
+         ORDER  BY timestamp ASC NULLS LAST, file_path ASC
+         LIMIT  ?1 OFFSET ?2",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![page.clamped_limit(), page.offset],
         super::photos::map_row_pub,
     )?;
     rows.collect::<SqlResult<Vec<_>>>().map_err(DbError::from)
@@ -227,7 +298,8 @@ pub fn auto_group_trips(
     let mut trip_ids: Vec<i64> = Vec::with_capacity(clusters.len());
 
     let mut insert_trip = conn.prepare_cached(
-        "INSERT INTO trips (name, start_ts, end_ts) VALUES (?1, ?2, ?3) RETURNING id",
+        // is_confirmed = 0: auto-grouped trips are "suggested" by default.
+        "INSERT INTO trips (name, start_ts, end_ts, is_confirmed) VALUES (?1, ?2, ?3, 0) RETURNING id",
     )?;
 
     for (start_ts, end_ts, photo_ids) in clusters {
@@ -281,6 +353,7 @@ fn map_trip_row(row: &rusqlite::Row<'_>) -> SqlResult<Trip> {
         end_ts: row.get(3)?,
         cover_photo_id: row.get(4)?,
         photo_count: row.get(5)?,
+        is_confirmed: row.get::<_, i64>(6)? != 0,
     })
 }
 
@@ -335,13 +408,86 @@ mod tests {
     #[test]
     fn create_and_get_trip() {
         let conn = mem_db();
-        let id = create_trip(&conn, "My Trip", Some(1_000_000), Some(1_100_000)).unwrap();
+        let id = create_trip(&conn, "My Trip", Some(1_000_000), Some(1_100_000), true).unwrap();
         let trip = get_trip(&conn, id).unwrap().expect("trip should exist");
         assert_eq!(trip.id, id);
         assert_eq!(trip.name, "My Trip");
         assert_eq!(trip.start_ts, Some(1_000_000));
         assert_eq!(trip.end_ts, Some(1_100_000));
         assert_eq!(trip.photo_count, 0);
+        assert!(trip.is_confirmed, "manually created trip should be confirmed");
+    }
+
+    #[test]
+    fn suggested_trip_starts_unconfirmed() {
+        let conn = mem_db();
+        let id = create_trip(&conn, "Suggested", Some(100), None, false).unwrap();
+        let trip = get_trip(&conn, id).unwrap().unwrap();
+        assert!(!trip.is_confirmed);
+    }
+
+    #[test]
+    fn confirm_trip_updates_flag() {
+        let conn = mem_db();
+        let id = create_trip(&conn, "Suggested", None, None, false).unwrap();
+        assert!(confirm_trip(&conn, id).unwrap());
+        let trip = get_trip(&conn, id).unwrap().unwrap();
+        assert!(trip.is_confirmed);
+    }
+
+    #[test]
+    fn confirm_nonexistent_trip_returns_false() {
+        let conn = mem_db();
+        assert!(!confirm_trip(&conn, 999).unwrap());
+    }
+
+    #[test]
+    fn rename_trip_updates_name() {
+        let conn = mem_db();
+        let id = create_trip(&conn, "Old Name", None, None, true).unwrap();
+        assert!(rename_trip(&conn, id, "New Name").unwrap());
+        let trip = get_trip(&conn, id).unwrap().unwrap();
+        assert_eq!(trip.name, "New Name");
+    }
+
+    #[test]
+    fn set_photo_trip_assigns_and_unassigns() {
+        let conn = mem_db();
+        let trip_id = create_trip(&conn, "T", None, None, true).unwrap();
+        let photo_id = insert(&conn, "/p.jpg", Some(1000));
+
+        // Assign
+        assert!(set_photo_trip(&conn, photo_id, Some(trip_id)).unwrap());
+        let trip = get_trip(&conn, trip_id).unwrap().unwrap();
+        assert_eq!(trip.photo_count, 1);
+
+        // Unassign
+        assert!(set_photo_trip(&conn, photo_id, None).unwrap());
+        let trip = get_trip(&conn, trip_id).unwrap().unwrap();
+        assert_eq!(trip.photo_count, 0);
+    }
+
+    #[test]
+    fn query_untripped_photos_excludes_trip_members() {
+        let conn = mem_db();
+        let trip_id = create_trip(&conn, "T", None, None, true).unwrap();
+        let a = insert(&conn, "/a.jpg", Some(100));
+        let _b = insert(&conn, "/b.jpg", Some(200));
+        set_photo_trip(&conn, a, Some(trip_id)).unwrap();
+
+        let untripped =
+            query_untripped_photos(&conn, &Page { limit: 10, offset: 0 }).unwrap();
+        assert_eq!(untripped.len(), 1);
+        assert_eq!(untripped[0].file_path, "/b.jpg");
+    }
+
+    #[test]
+    fn auto_group_creates_suggested_trips() {
+        let conn = mem_db();
+        insert(&conn, "/a.jpg", Some(0));
+        let trip_ids = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
+        let trip = get_trip(&conn, trip_ids[0]).unwrap().unwrap();
+        assert!(!trip.is_confirmed, "auto-grouped trips should start as suggested");
     }
 
     #[test]
@@ -353,7 +499,7 @@ mod tests {
     #[test]
     fn delete_trip_unassigns_photos() {
         let conn = mem_db();
-        let trip_id = create_trip(&conn, "T", None, None).unwrap();
+        let trip_id = create_trip(&conn, "T", None, None, true).unwrap();
         // Manually assign a photo to the trip.
         let photo_id = insert(&conn, "/a.jpg", Some(100));
         conn.execute(
@@ -391,9 +537,9 @@ mod tests {
     #[test]
     fn list_trips_ordered_by_start_ts() {
         let conn = mem_db();
-        create_trip(&conn, "Later", Some(2_000_000), None).unwrap();
-        create_trip(&conn, "Earlier", Some(1_000_000), None).unwrap();
-        create_trip(&conn, "No ts", None, None).unwrap();
+        create_trip(&conn, "Later", Some(2_000_000), None, true).unwrap();
+        create_trip(&conn, "Earlier", Some(1_000_000), None, true).unwrap();
+        create_trip(&conn, "No ts", None, None, true).unwrap();
 
         let trips = list_trips(&conn, &Page { limit: 10, offset: 0 }).unwrap();
         assert_eq!(trips[0].name, "Earlier");
@@ -405,7 +551,7 @@ mod tests {
     fn list_trips_pagination() {
         let conn = mem_db();
         for i in 0..5 {
-            create_trip(&conn, &format!("Trip {i}"), Some(i as i64 * 1000), None).unwrap();
+            create_trip(&conn, &format!("Trip {i}"), Some(i as i64 * 1000), None, true).unwrap();
         }
         let page1 = list_trips(&conn, &Page { limit: 2, offset: 0 }).unwrap();
         let page2 = list_trips(&conn, &Page { limit: 2, offset: 2 }).unwrap();
@@ -419,7 +565,7 @@ mod tests {
     #[test]
     fn query_photos_by_trip_returns_assigned_photos() {
         let conn = mem_db();
-        let trip_id = create_trip(&conn, "T", None, None).unwrap();
+        let trip_id = create_trip(&conn, "T", None, None, true).unwrap();
         insert(&conn, "/z.jpg", Some(300));
         let a = insert(&conn, "/a.jpg", Some(100));
         let b = insert(&conn, "/b.jpg", Some(200));

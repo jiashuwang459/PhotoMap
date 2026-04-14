@@ -121,6 +121,15 @@ CREATE INDEX IF NOT EXISTS idx_trips_start_ts
     WHERE start_ts IS NOT NULL;
 ";
 
+/// ADD COLUMN migration: `is_confirmed` was added to the `trips` table in
+/// phase 6.  Databases created in phase 5 (before this column existed) need
+/// this `ALTER TABLE` migration applied at startup.
+///
+/// `0` = suggested (auto-grouped, pending user review);
+/// `1` = confirmed (user accepted).
+pub const ADD_COLUMN_TRIPS_IS_CONFIRMED: (&str, &str, &str) =
+    ("trips", "is_confirmed", "INTEGER NOT NULL DEFAULT 0");
+
 /// All DDL statements in migration order.
 pub const ALL_MIGRATIONS: &[&str] = &[
     CREATE_PHOTOS_TABLE,

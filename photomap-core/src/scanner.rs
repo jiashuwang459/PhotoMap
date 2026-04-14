@@ -195,8 +195,14 @@ pub fn scan_directory(conn: &Connection, dir: &Path) -> Result<ScanReport, ScanE
         for photo in batch {
             if !seen_paths.contains(&photo.file_path) {
                 match delete_photo_by_path(conn, &photo.file_path) {
-                    Ok(true) => report.removed += 1,
-                    Ok(false) => {}
+                    Ok(Some(thumbnail_path)) => {
+                        report.removed += 1;
+                        // Best-effort: delete the thumbnail file from disk.
+                        if let Some(thumb) = thumbnail_path {
+                            let _ = std::fs::remove_file(&thumb);
+                        }
+                    }
+                    Ok(None) => {}
                     Err(e) => {
                         report.errors.push(ScanEntryError {
                             file_path: photo.file_path,

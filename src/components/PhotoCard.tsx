@@ -1,3 +1,4 @@
+import { convertFileSrc } from "@tauri-apps/api/core";
 import type { Photo } from "../api/types";
 
 /** Format a Unix epoch (seconds) as a human-readable local date string. */
@@ -30,8 +31,17 @@ export function PhotoCard({ photo }: PhotoCardProps) {
 
   return (
     <div className="photo-card" title={photo.file_path}>
-      <div className="photo-card-icon" aria-hidden="true">
-        🖼
+      <div className="photo-card-thumb" aria-hidden="true">
+        {photo.thumbnail_path ? (
+          <img
+            className="photo-card-thumb-img"
+            src={convertFileSrc(photo.thumbnail_path)}
+            alt=""
+            loading="lazy"
+          />
+        ) : (
+          <span className="photo-card-thumb-icon">🖼</span>
+        )}
       </div>
       <div className="photo-card-body">
         <span className="photo-card-name">{basename(photo.file_path)}</span>

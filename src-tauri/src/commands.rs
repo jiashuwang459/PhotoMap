@@ -1,5 +1,5 @@
 use rusqlite::Connection;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::State;
 
@@ -7,8 +7,11 @@ use photomap_core::{
     upsert_photo, query_by_time_range, query_by_bounding_box, query_all_photos,
     get_photo_by_path, delete_photo_by_path, scan_directory,
     create_trip, list_trips, get_trip, delete_trip,
-    query_photos_by_trip, auto_group_trips,
+    confirm_trip, rename_trip, set_photo_trip,
+    query_photos_by_trip, query_untripped_photos, auto_group_trips,
+    generate_thumbnails_batch,
     BoundingBox, DbError, InsertPhoto, Page, Photo, ScanError, ScanReport, Trip,
+    ThumbnailBatchReport, ThumbnailError,
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -22,6 +25,13 @@ use photomap_core::{
 /// short-lived queries.  For higher write concurrency (future phases) this
 /// can be replaced with a connection pool (e.g. `r2d2-sqlite`).
 pub struct DbState(pub Mutex<Connection>);
+
+/// The directory where generated thumbnails are stored.
+///
+/// Resolved at startup to `{app_data_dir}/thumbnails/` and stored as managed
+/// state so that thumbnail commands can resolve output paths without needing
+/// the Tauri `App` handle inside commands.
+pub struct ThumbnailDirState(pub PathBuf);
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Tauri commands
@@ -89,7 +99,8 @@ pub fn cmd_scan_directory(state: State<'_, DbState>, dir: String) -> Result<Scan
     scan_directory(&conn, Path::new(&dir))
 }
 
-/// Delete the photo record with the given `file_path`.
+/// Delete the photo record with the given `file_path` and remove its thumbnail
+/// from disk if one exists.
 ///
 /// Returns `true` if a row was deleted, `false` if no such row existed.
 ///
@@ -98,7 +109,15 @@ pub fn cmd_scan_directory(state: State<'_, DbState>, dir: String) -> Result<Scan
 #[tauri::command]
 pub fn cmd_delete_photo(state: State<'_, DbState>, file_path: String) -> Result<bool, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
-    delete_photo_by_path(&conn, &file_path)
+    match delete_photo_by_path(&conn, &file_path)? {
+        Some(thumbnail_path) => {
+            if let Some(thumb) = thumbnail_path {
+                let _ = std::fs::remove_file(&thumb);
+            }
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 /// Return all photos ordered by timestamp ascending (NULL timestamps last),
@@ -159,6 +178,8 @@ pub fn cmd_get_trip(
 
 /// Create a new trip with the given name and optional time bounds.
 ///
+/// `is_confirmed` should be `true` for manually created trips.
+///
 /// Returns the id of the newly created trip.
 ///
 /// # Errors
@@ -169,9 +190,62 @@ pub fn cmd_create_trip(
     name: String,
     start_ts: Option<i64>,
     end_ts: Option<i64>,
+    is_confirmed: bool,
 ) -> Result<i64, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
-    create_trip(&conn, &name, start_ts, end_ts)
+    create_trip(&conn, &name, start_ts, end_ts, is_confirmed)
+}
+
+/// Mark the trip as confirmed (user accepted the auto-group suggestion).
+///
+/// Returns `true` if the trip was found and updated, `false` if it did not
+/// exist.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_confirm_trip(
+    state: State<'_, DbState>,
+    trip_id: i64,
+) -> Result<bool, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    confirm_trip(&conn, trip_id)
+}
+
+/// Rename a trip.
+///
+/// Returns `true` if the trip was found and renamed, `false` if it did not
+/// exist.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_rename_trip(
+    state: State<'_, DbState>,
+    trip_id: i64,
+    name: String,
+) -> Result<bool, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    rename_trip(&conn, trip_id, &name)
+}
+
+/// Assign or unassign a photo to/from a trip.
+///
+/// Pass `Some(trip_id)` to add the photo, or `None` to remove it from its
+/// current trip.
+///
+/// Returns `true` if the photo record was found and updated.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_set_photo_trip(
+    state: State<'_, DbState>,
+    photo_id: i64,
+    trip_id: Option<i64>,
+) -> Result<bool, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    set_photo_trip(&conn, photo_id, trip_id)
 }
 
 /// Delete the trip with the given id.
@@ -208,6 +282,22 @@ pub fn cmd_query_photos_by_trip(
     query_photos_by_trip(&conn, trip_id, &page)
 }
 
+/// Return photos not assigned to any trip, ordered by timestamp ascending.
+///
+/// Results are paginated.  Used to populate the "add photos" picker in the
+/// trip detail view.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_query_untripped_photos(
+    state: State<'_, DbState>,
+    page: Page,
+) -> Result<Vec<Photo>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    query_untripped_photos(&conn, &page)
+}
+
 /// Cluster all timestamped photos into trips using a temporal-gap algorithm.
 ///
 /// A new trip boundary is created whenever two consecutive photos (ordered by
@@ -227,4 +317,27 @@ pub fn cmd_auto_group_trips(
 ) -> Result<Vec<i64>, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
     auto_group_trips(&conn, gap_seconds)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Thumbnail commands
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Generate thumbnails for up to `batch_size` photos that do not yet have one.
+///
+/// Thumbnails are stored in the application data directory under `thumbnails/`.
+/// Call repeatedly until [`ThumbnailBatchReport::remaining`] reaches `0` to
+/// process the entire library.
+///
+/// # Errors
+/// Returns a string error on a fatal database failure.  Per-photo errors are
+/// captured in [`ThumbnailBatchReport::errors`].
+#[tauri::command]
+pub fn cmd_generate_thumbnails_batch(
+    db_state: State<'_, DbState>,
+    thumb_state: State<'_, ThumbnailDirState>,
+    batch_size: u32,
+) -> Result<ThumbnailBatchReport, ThumbnailError> {
+    let conn = db_state.0.lock().expect("db mutex poisoned");
+    generate_thumbnails_batch(&conn, &thumb_state.0, batch_size)
 }
