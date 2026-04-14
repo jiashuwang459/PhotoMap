@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BoundingBox, InsertPhoto, Page, Photo, ScanReport } from "./types";
+import type { BoundingBox, InsertPhoto, Page, Photo, ScanReport, Trip } from "./types";
 
 /**
  * Insert or update a photo record in the database.
@@ -86,4 +86,75 @@ export async function deletePhoto(filePath: string): Promise<boolean> {
  */
 export async function getPhotoByPath(filePath: string): Promise<Photo | null> {
   return invoke<Photo | null>("cmd_get_photo_by_path", { filePath });
+}
+
+// ── Trip API ─────────────────────────────────────────────────────────────────
+
+/**
+ * Return all trips ordered by start timestamp ascending.
+ *
+ * Paginated: increment `page.offset` by `page.limit` on each call until fewer
+ * than `page.limit` results are returned.
+ */
+export async function listTrips(page: Page): Promise<Trip[]> {
+  return invoke<Trip[]>("cmd_list_trips", { page });
+}
+
+/**
+ * Return the trip with the given `tripId`, or `null` if it does not exist.
+ */
+export async function getTrip(tripId: number): Promise<Trip | null> {
+  return invoke<Trip | null>("cmd_get_trip", { tripId });
+}
+
+/**
+ * Create a new trip with the given name and optional time bounds.
+ *
+ * @returns The id of the newly created trip.
+ */
+export async function createTrip(
+  name: string,
+  startTs: number | null,
+  endTs: number | null
+): Promise<number> {
+  return invoke<number>("cmd_create_trip", { name, startTs, endTs });
+}
+
+/**
+ * Delete the trip with the given `tripId`.
+ *
+ * Photos that belonged to the trip have their `trip_id` set to `null`; they
+ * are not removed from the library.
+ *
+ * @returns `true` if a trip was deleted, `false` if none existed.
+ */
+export async function deleteTrip(tripId: number): Promise<boolean> {
+  return invoke<boolean>("cmd_delete_trip", { tripId });
+}
+
+/**
+ * Return all photos assigned to the given trip, ordered by timestamp ascending.
+ *
+ * Paginated: increment `page.offset` by `page.limit` on each call until fewer
+ * than `page.limit` results are returned.
+ */
+export async function queryPhotosByTrip(
+  tripId: number,
+  page: Page
+): Promise<Photo[]> {
+  return invoke<Photo[]>("cmd_query_photos_by_trip", { tripId, page });
+}
+
+/**
+ * Cluster all timestamped photos into trips using a temporal-gap algorithm.
+ *
+ * A new trip is created whenever two consecutive photos (by timestamp) are
+ * more than `gapSeconds` apart.  Existing trips are cleared first, making
+ * this operation idempotent.  Photos without a timestamp are left ungrouped.
+ *
+ * @param gapSeconds Gap threshold in seconds (default: 6 hours = 21 600).
+ * @returns The list of newly created trip ids.
+ */
+export async function autoGroupTrips(gapSeconds: number): Promise<number[]> {
+  return invoke<number[]>("cmd_auto_group_trips", { gapSeconds });
 }

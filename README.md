@@ -23,6 +23,7 @@ A cross-platform desktop application for managing and exploring your photo libra
 
 - **Library browser** — paginated photo grid showing all indexed photos with name, date, and GPS badge; filter by date range.
 - **Interactive map** — OpenStreetMap-backed map that automatically loads geotagged photos in the current viewport; click any marker to see the photo's name, date, and coordinates.
+- **Trip grouping** — automatically clusters timestamped photos into "trips" by detecting time gaps between consecutive shots; one-click re-grouping replaces all existing trips; each trip is browsable as a paginated photo list.
 - **Directory scanner** — recursively indexes a folder of photos, extracting EXIF timestamps and GPS coordinates via SHA-256 content hashing for fast incremental re-scans; displays an add/update/remove/error summary.
 - **Time-range queries** — retrieve photos by date range, paginated and ordered by timestamp.
 - **Bounding-box queries** — retrieve geotagged photos by map viewport (WGS-84 lat/lon bounding box).
@@ -38,6 +39,7 @@ A cross-platform desktop application for managing and exploring your photo libra
 | Frontend | [React 18](https://react.dev) + [TypeScript 5](https://www.typescriptlang.org) |
 | Frontend bundler | [Vite 5](https://vitejs.dev) |
 | Map | [Leaflet](https://leafletjs.com) 1.9 via [react-leaflet](https://react-leaflet.js.org) 4 |
+| Time library | [`time`](https://crates.io/crates/time) 0.3 — UTC date formatting in trip names |
 | Backend (core library) | Rust 2021 — `photomap-core` crate |
 | Backend (app crate) | Rust 2021 — `src-tauri` crate |
 | Database | [SQLite](https://www.sqlite.org) via [`rusqlite`](https://crates.io/crates/rusqlite) (bundled) |
@@ -60,8 +62,9 @@ PhotoMap/
 │   │   ├── MapView.tsx       # Interactive Leaflet map tab
 │   │   ├── PhotoCard.tsx     # Single photo metadata card
 │   │   ├── PhotoGrid.tsx     # Paginated photo grid with filter wiring
-│   │   └── ScanPanel.tsx     # Directory scanner form + report display
-│   ├── App.tsx               # Root component: tab navigation (Library | Map | Scan)
+│   │   ├── ScanPanel.tsx     # Directory scanner form + report display
+│   │   └── TripsPanel.tsx    # Trip list, auto-group control, trip detail drill-down
+│   ├── App.tsx               # Root component: tab navigation (Library | Map | Trips | Scan)
 │   └── main.tsx
 ├── src-tauri/                # Tauri application crate
 │   ├── src/
@@ -74,7 +77,8 @@ PhotoMap/
 │       ├── db/
 │       │   ├── mod.rs        # Re-exports all public DB symbols
 │       │   ├── photos.rs     # SQL queries, upserts, migrations
-│       │   └── schema.rs     # DDL as string constants
+│       │   ├── schema.rs     # DDL as string constants
+│       │   └── trips.rs      # Trip CRUD + auto_group_trips algorithm
 │       ├── scanner.rs        # Background scanner (SHA-256, EXIF, DB sync)
 │       └── lib.rs
 ├── index.html
@@ -134,13 +138,16 @@ The application has two tabs accessible from the header navigation:
 |---|---|
 | **Library** | Browse all indexed photos in a paginated grid. Use the date-range filter to narrow results. |
 | **Map** | OpenStreetMap view that automatically queries geotagged photos in the current viewport. Pan or zoom to refresh. Click any marker to see the photo's name, date, and GPS coordinates. |
+| **Trips** | View automatically grouped trips. Click **Auto-group trips** to cluster all timestamped photos by temporal proximity (6-hour gap = new trip). Click any trip to browse its photos. |
 | **Scan** | Enter an absolute directory path and click **Scan** to index images. A summary shows how many files were added, updated, removed, or skipped. |
 
 **Typical first-run workflow:**
 1. Open the **Scan** tab.
 2. Paste the absolute path to your photo folder (e.g. `/home/alice/Pictures`).
 3. Click **Scan** and wait for the report.
-4. Switch to **Library** to browse your indexed photos, or **Map** to explore geotagged photos by location.
+4. Switch to **Library** to browse your indexed photos.
+5. Switch to **Trips** and click **Auto-group trips** to organise photos into trips.
+6. Switch to **Map** to explore geotagged photos by location.
 
 ---
 
@@ -174,6 +181,8 @@ Tests cover:
 - EXIF datetime parsing (valid dates, edge cases, invalid input)
 - Image extension detection
 - Scanner: add, update, unchanged, remove, recursive subdirectory, and error cases
+- Trip CRUD: create, get, delete (including photo unassignment), list ordering and pagination
+- `auto_group_trips`: gap splitting, idempotency, untimed photo exclusion, same-day disambiguation
 
 ### TypeScript type-check
 
@@ -213,3 +222,12 @@ Supported image extensions: `.jpg`, `.jpeg`, `.png`, `.tiff`, `.tif`, `.heic`, `
 - Whenever the viewport changes (`moveend` / `zoomend`), `MapView` calls `queryByBoundingBox` with the current WGS-84 bounding box to fetch up to 200 geotagged photos.
 - Only photos with non-null `latitude` and `longitude` values are plotted; ungeotagged photos are not shown on the map.
 - Each marker opens a Leaflet popup with the file name, formatted date, GPS coordinates, and absolute file path.
+
+### Trip grouping
+
+- The **Trips** tab exposes `auto_group_trips` (`photomap-core::db::trips`), a pure SQLite-based temporal clustering algorithm.
+- Algorithm: all photos with timestamps are sorted by timestamp; wherever two consecutive photos are separated by more than the gap threshold (default 6 hours), a new trip boundary is inserted.
+- Each cluster becomes one `trips` row.  Trip names are derived from the UTC start date (e.g. `Trip 2024-06-01`); same-day trips are disambiguated with a numeric suffix (`Trip 2024-06-01 (2)`).
+- The operation is fully idempotent: existing trips and `trip_id` assignments are cleared before new trips are written.
+- Photos without a timestamp are left ungrouped (`trip_id = NULL`) and do not appear in any trip.
+- The `trips` table and its index (`idx_trips_start_ts`) are added to the schema as idempotent migrations alongside the existing `photos` DDL.

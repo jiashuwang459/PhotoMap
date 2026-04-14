@@ -24,8 +24,9 @@ PhotoMap/
 │   │   ├── MapView.tsx       # Interactive Leaflet map tab
 │   │   ├── PhotoCard.tsx     # Single photo metadata card
 │   │   ├── PhotoGrid.tsx     # Paginated photo grid with filter wiring
-│   │   └── ScanPanel.tsx     # Directory scanner form + report display
-│   ├── App.tsx               # Root component: tab navigation (Library | Map | Scan)
+│   │   ├── ScanPanel.tsx     # Directory scanner form + report display
+│   │   └── TripsPanel.tsx    # Trip list, auto-group control, trip detail drill-down
+│   ├── App.tsx               # Root component: tab navigation (Library | Map | Trips | Scan)
 │   └── main.tsx
 ├── src-tauri/                # Tauri application crate
 │   ├── src/
@@ -38,7 +39,8 @@ PhotoMap/
 │       ├── db/
 │       │   ├── mod.rs        # Re-exports all public DB symbols
 │       │   ├── photos.rs     # All SQL queries and DB helpers
-│       │   └── schema.rs     # DDL migrations as string constants
+│       │   ├── schema.rs     # DDL migrations as string constants
+│       │   └── trips.rs      # Trip CRUD + auto_group_trips algorithm
 │       ├── scanner.rs        # Background file scanner (SHA-256, EXIF, DB sync)
 │       └── lib.rs            # Public re-exports
 ├── index.html

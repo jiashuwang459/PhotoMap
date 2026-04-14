@@ -6,7 +6,9 @@ use tauri::State;
 use photomap_core::{
     upsert_photo, query_by_time_range, query_by_bounding_box, query_all_photos,
     get_photo_by_path, delete_photo_by_path, scan_directory,
-    BoundingBox, DbError, InsertPhoto, Page, Photo, ScanError, ScanReport,
+    create_trip, list_trips, get_trip, delete_trip,
+    query_photos_by_trip, auto_group_trips,
+    BoundingBox, DbError, InsertPhoto, Page, Photo, ScanError, ScanReport, Trip,
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -124,4 +126,105 @@ pub fn cmd_get_photo_by_path(
 ) -> Result<Option<Photo>, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
     get_photo_by_path(&conn, &file_path)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Trip commands
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Return all trips ordered by start timestamp ascending, then by id.
+///
+/// Results are paginated.
+#[tauri::command]
+pub fn cmd_list_trips(
+    state: State<'_, DbState>,
+    page: Page,
+) -> Result<Vec<Trip>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    list_trips(&conn, &page)
+}
+
+/// Return the trip with the given `trip_id`, or `null` if it does not exist.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_get_trip(
+    state: State<'_, DbState>,
+    trip_id: i64,
+) -> Result<Option<Trip>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    get_trip(&conn, trip_id)
+}
+
+/// Create a new trip with the given name and optional time bounds.
+///
+/// Returns the id of the newly created trip.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_create_trip(
+    state: State<'_, DbState>,
+    name: String,
+    start_ts: Option<i64>,
+    end_ts: Option<i64>,
+) -> Result<i64, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    create_trip(&conn, &name, start_ts, end_ts)
+}
+
+/// Delete the trip with the given id.
+///
+/// Photos belonging to the trip have their `trip_id` set to `null` (they are
+/// not removed from the library).
+///
+/// Returns `true` if a trip was deleted, `false` if none existed.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_delete_trip(
+    state: State<'_, DbState>,
+    trip_id: i64,
+) -> Result<bool, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    delete_trip(&conn, trip_id)
+}
+
+/// Return all photos assigned to the given trip, ordered by timestamp ascending.
+///
+/// Results are paginated.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_query_photos_by_trip(
+    state: State<'_, DbState>,
+    trip_id: i64,
+    page: Page,
+) -> Result<Vec<Photo>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    query_photos_by_trip(&conn, trip_id, &page)
+}
+
+/// Cluster all timestamped photos into trips using a temporal-gap algorithm.
+///
+/// A new trip boundary is created whenever two consecutive photos (ordered by
+/// timestamp) are more than `gap_seconds` apart.  Existing trips are cleared
+/// before new ones are written, making this operation idempotent.
+///
+/// Photos without a timestamp are left ungrouped.
+///
+/// Returns the list of newly created trip ids.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_auto_group_trips(
+    state: State<'_, DbState>,
+    gap_seconds: i64,
+) -> Result<Vec<i64>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    auto_group_trips(&conn, gap_seconds)
 }

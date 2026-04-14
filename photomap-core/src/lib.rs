@@ -7,5 +7,8 @@ pub use db::{
     query_all_photos,
     get_photo_by_path, delete_photo_by_path, list_photos_by_path_prefix,
     BoundingBox, DbError, InsertPhoto, Page, Photo,
+    create_trip, list_trips, get_trip, delete_trip,
+    query_photos_by_trip, auto_group_trips,
+    Trip,
 };
 pub use scanner::{scan_directory, compute_sha256, ScanError, ScanReport, ScanEntryError};

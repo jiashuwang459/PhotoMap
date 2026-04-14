@@ -8,6 +8,8 @@ use commands::{
     DbState,
     cmd_upsert_photo, cmd_query_by_time_range, cmd_query_by_bounding_box,
     cmd_scan_directory, cmd_delete_photo, cmd_query_all_photos, cmd_get_photo_by_path,
+    cmd_list_trips, cmd_get_trip, cmd_create_trip, cmd_delete_trip,
+    cmd_query_photos_by_trip, cmd_auto_group_trips,
 };
 use photomap_core::db as core_db;
 
@@ -46,6 +48,12 @@ pub fn run() {
             cmd_delete_photo,
             cmd_query_all_photos,
             cmd_get_photo_by_path,
+            cmd_list_trips,
+            cmd_get_trip,
+            cmd_create_trip,
+            cmd_delete_trip,
+            cmd_query_photos_by_trip,
+            cmd_auto_group_trips,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

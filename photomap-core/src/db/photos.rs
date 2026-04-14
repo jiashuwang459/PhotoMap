@@ -375,6 +375,12 @@ pub fn delete_photo_by_path(conn: &Connection, file_path: &str) -> Result<bool, 
 
 
 
+/// Map a query row to a [`Photo`].  Public so sibling modules (e.g. `trips`)
+/// can reuse it without duplicating the column mapping.
+pub fn map_row_pub(row: &rusqlite::Row<'_>) -> SqlResult<Photo> {
+    map_row(row)
+}
+
 fn map_row(row: &rusqlite::Row<'_>) -> SqlResult<Photo> {
     Ok(Photo {
         id: row.get(0)?,

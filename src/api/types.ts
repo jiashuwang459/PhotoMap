@@ -51,6 +51,20 @@ export interface BoundingBox {
   max_lon: number;
 }
 
+/** A trip record returned from the database. */
+export interface Trip {
+  id: number;
+  name: string;
+  /** Unix epoch seconds of the earliest photo in the trip; null if unset. */
+  start_ts: number | null;
+  /** Unix epoch seconds of the latest photo in the trip; null if unset. */
+  end_ts: number | null;
+  /** `id` of the cover photo; null until assigned. */
+  cover_photo_id: number | null;
+  /** Number of photos currently assigned to this trip. */
+  photo_count: number;
+}
+
 /** A per-file error recorded inside {@link ScanReport}. */
 export interface ScanEntryError {
   /** Absolute path of the file that caused the error. */

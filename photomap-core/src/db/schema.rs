@@ -91,6 +91,36 @@ CREATE INDEX IF NOT EXISTS idx_photos_file_hash
     WHERE file_hash IS NOT NULL;
 ";
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Trips table
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// `trips` table: one row per automatically- or manually-grouped trip.
+///
+/// A trip is a time-bounded cluster of photos.  The background
+/// `auto_group_trips` function creates trips by splitting the ordered photo
+/// timeline wherever two consecutive (by timestamp) photos are more than a
+/// configurable gap apart.
+///
+/// `cover_photo_id` is a nullable soft-reference to the photo that should be
+/// displayed as the trip's representative image.
+pub const CREATE_TRIPS_TABLE: &str = "
+CREATE TABLE IF NOT EXISTS trips (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    name           TEXT    NOT NULL,
+    start_ts       INTEGER,  -- Unix epoch seconds of the earliest photo in the trip
+    end_ts         INTEGER,  -- Unix epoch seconds of the latest photo in the trip
+    cover_photo_id INTEGER   -- Soft-ref to photos.id; null until set
+);
+";
+
+/// Index for looking up trips ordered by start time (timeline view).
+pub const CREATE_IDX_TRIPS_START_TS: &str = "
+CREATE INDEX IF NOT EXISTS idx_trips_start_ts
+    ON trips (start_ts)
+    WHERE start_ts IS NOT NULL;
+";
+
 /// All DDL statements in migration order.
 pub const ALL_MIGRATIONS: &[&str] = &[
     CREATE_PHOTOS_TABLE,
@@ -98,4 +128,6 @@ pub const ALL_MIGRATIONS: &[&str] = &[
     CREATE_IDX_LAT_LON,
     CREATE_IDX_TRIP,
     CREATE_IDX_FILE_HASH,
+    CREATE_TRIPS_TABLE,
+    CREATE_IDX_TRIPS_START_TS,
 ];

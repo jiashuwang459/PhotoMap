@@ -1,5 +1,6 @@
 pub mod photos;
 pub mod schema;
+pub mod trips;
 
 pub use photos::{
     open, run_migrations,
@@ -7,4 +8,10 @@ pub use photos::{
     query_all_photos,
     get_photo_by_path, delete_photo_by_path, list_photos_by_path_prefix,
     BoundingBox, DbError, InsertPhoto, Page, Photo,
+};
+
+pub use trips::{
+    create_trip, list_trips, get_trip, delete_trip,
+    query_photos_by_trip, auto_group_trips,
+    Trip,
 };
