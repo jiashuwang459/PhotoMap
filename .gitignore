@@ -38,3 +38,6 @@ yarn-error.log*
 # Env / secrets
 .env
 .env.*
+
+/src-tauri/target/
+/target/
