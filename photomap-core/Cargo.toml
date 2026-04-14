@@ -1,0 +1,10 @@
+[package]
+name = "photomap-core"
+version = "0.1.0"
+edition = "2021"
+description = "Database layer and domain logic for PhotoMap"
+
+[dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
