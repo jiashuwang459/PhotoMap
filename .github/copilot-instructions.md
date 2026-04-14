@@ -21,10 +21,11 @@ PhotoMap/
 │   │   └── types.ts          # Shared TypeScript interfaces (mirrors Rust structs)
 │   ├── components/
 │   │   ├── FilterBar.tsx     # Date-range filter UI
+│   │   ├── MapView.tsx       # Interactive Leaflet map tab
 │   │   ├── PhotoCard.tsx     # Single photo metadata card
 │   │   ├── PhotoGrid.tsx     # Paginated photo grid with filter wiring
 │   │   └── ScanPanel.tsx     # Directory scanner form + report display
-│   ├── App.tsx               # Root component: tab navigation
+│   ├── App.tsx               # Root component: tab navigation (Library | Map | Scan)
 │   └── main.tsx
 ├── src-tauri/                # Tauri application crate
 │   ├── src/

@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { PhotoGrid } from "./components/PhotoGrid";
 import { ScanPanel } from "./components/ScanPanel";
+import { MapView } from "./components/MapView";
 import "./App.css";
 
-type Tab = "library" | "scan";
+type Tab = "library" | "map" | "scan";
 
 function App() {
   const [tab, setTab] = useState<Tab>("library");
@@ -21,6 +22,12 @@ function App() {
             Library
           </button>
           <button
+            className={`nav-tab${tab === "map" ? " nav-tab--active" : ""}`}
+            onClick={() => setTab("map")}
+          >
+            Map
+          </button>
+          <button
             className={`nav-tab${tab === "scan" ? " nav-tab--active" : ""}`}
             onClick={() => setTab("scan")}
           >
@@ -29,8 +36,10 @@ function App() {
         </nav>
       </header>
 
-      <main className="app-content">
-        {tab === "library" ? <PhotoGrid /> : <ScanPanel />}
+      <main className={`app-content${tab === "map" ? " app-content--map" : ""}`}>
+        {tab === "library" && <PhotoGrid />}
+        {tab === "map" && <MapView />}
+        {tab === "scan" && <ScanPanel />}
       </main>
     </div>
   );

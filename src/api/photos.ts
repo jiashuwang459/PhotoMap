@@ -78,3 +78,12 @@ export async function scanDirectory(dir: string): Promise<ScanReport> {
 export async function deletePhoto(filePath: string): Promise<boolean> {
   return invoke<boolean>("cmd_delete_photo", { filePath });
 }
+
+/**
+ * Look up a single photo record by its absolute file path.
+ *
+ * @returns The {@link Photo} record, or `null` if it has not been indexed.
+ */
+export async function getPhotoByPath(filePath: string): Promise<Photo | null> {
+  return invoke<Photo | null>("cmd_get_photo_by_path", { filePath });
+}

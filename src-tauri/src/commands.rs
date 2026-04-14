@@ -5,7 +5,7 @@ use tauri::State;
 
 use photomap_core::{
     upsert_photo, query_by_time_range, query_by_bounding_box, query_all_photos,
-    delete_photo_by_path, scan_directory,
+    get_photo_by_path, delete_photo_by_path, scan_directory,
     BoundingBox, DbError, InsertPhoto, Page, Photo, ScanError, ScanReport,
 };
 
@@ -119,4 +119,20 @@ pub fn cmd_query_all_photos(
 ) -> Result<Vec<Photo>, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
     query_all_photos(&conn, &page)
+}
+
+/// Look up a single photo record by its absolute file path.
+///
+/// Returns `None` (serialised as JSON `null`) when no record exists for the
+/// given path.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_get_photo_by_path(
+    state: State<'_, DbState>,
+    file_path: String,
+) -> Result<Option<Photo>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    get_photo_by_path(&conn, &file_path)
 }

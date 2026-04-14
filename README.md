@@ -22,6 +22,7 @@ A cross-platform desktop application for managing and exploring your photo libra
 ## Features
 
 - **Library browser** — paginated photo grid showing all indexed photos with name, date, and GPS badge; filter by date range.
+- **Interactive map** — OpenStreetMap-backed map that automatically loads geotagged photos in the current viewport; click any marker to see the photo's name, date, and coordinates.
 - **Directory scanner** — recursively indexes a folder of photos, extracting EXIF timestamps and GPS coordinates via SHA-256 content hashing for fast incremental re-scans; displays an add/update/remove/error summary.
 - **Time-range queries** — retrieve photos by date range, paginated and ordered by timestamp.
 - **Bounding-box queries** — retrieve geotagged photos by map viewport (WGS-84 lat/lon bounding box).
@@ -36,6 +37,7 @@ A cross-platform desktop application for managing and exploring your photo libra
 | Desktop shell | [Tauri 2](https://tauri.app) |
 | Frontend | [React 18](https://react.dev) + [TypeScript 5](https://www.typescriptlang.org) |
 | Frontend bundler | [Vite 5](https://vitejs.dev) |
+| Map | [Leaflet](https://leafletjs.com) 1.9 via [react-leaflet](https://react-leaflet.js.org) 4 |
 | Backend (core library) | Rust 2021 — `photomap-core` crate |
 | Backend (app crate) | Rust 2021 — `src-tauri` crate |
 | Database | [SQLite](https://www.sqlite.org) via [`rusqlite`](https://crates.io/crates/rusqlite) (bundled) |
@@ -55,10 +57,11 @@ PhotoMap/
 │   │   └── types.ts          # TypeScript interfaces mirroring Rust structs
 │   ├── components/
 │   │   ├── FilterBar.tsx     # Date-range filter UI
+│   │   ├── MapView.tsx       # Interactive Leaflet map tab
 │   │   ├── PhotoCard.tsx     # Single photo metadata card
 │   │   ├── PhotoGrid.tsx     # Paginated photo grid with filter wiring
 │   │   └── ScanPanel.tsx     # Directory scanner form + report display
-│   ├── App.tsx               # Root component: tab navigation (Library | Scan)
+│   ├── App.tsx               # Root component: tab navigation (Library | Map | Scan)
 │   └── main.tsx
 ├── src-tauri/                # Tauri application crate
 │   ├── src/
@@ -130,13 +133,14 @@ The application has two tabs accessible from the header navigation:
 | Tab | Purpose |
 |---|---|
 | **Library** | Browse all indexed photos in a paginated grid. Use the date-range filter to narrow results. |
+| **Map** | OpenStreetMap view that automatically queries geotagged photos in the current viewport. Pan or zoom to refresh. Click any marker to see the photo's name, date, and GPS coordinates. |
 | **Scan** | Enter an absolute directory path and click **Scan** to index images. A summary shows how many files were added, updated, removed, or skipped. |
 
 **Typical first-run workflow:**
 1. Open the **Scan** tab.
 2. Paste the absolute path to your photo folder (e.g. `/home/alice/Pictures`).
 3. Click **Scan** and wait for the report.
-4. Switch to **Library** to browse your indexed photos.
+4. Switch to **Library** to browse your indexed photos, or **Map** to explore geotagged photos by location.
 
 ---
 
@@ -202,3 +206,10 @@ The background scanner (`photomap-core::scanner::scan_directory`) performs two p
 2. **Prune** — query all DB records whose `file_path` starts with the scanned directory and remove any whose file no longer exists on disk.
 
 Supported image extensions: `.jpg`, `.jpeg`, `.png`, `.tiff`, `.tif`, `.heic`, `.heif`, `.webp`.
+
+### Map view
+
+- The **Map** tab uses [Leaflet](https://leafletjs.com) via [react-leaflet](https://react-leaflet.js.org) rendered on OpenStreetMap tiles.
+- Whenever the viewport changes (`moveend` / `zoomend`), `MapView` calls `queryByBoundingBox` with the current WGS-84 bounding box to fetch up to 200 geotagged photos.
+- Only photos with non-null `latitude` and `longitude` values are plotted; ungeotagged photos are not shown on the map.
+- Each marker opens a Leaflet popup with the file name, formatted date, GPS coordinates, and absolute file path.

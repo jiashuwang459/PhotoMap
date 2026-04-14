@@ -69,6 +69,94 @@
   padding: 1.5rem;
 }
 
+/* Map tab: remove padding so the map fills edge-to-edge */
+.app-content--map {
+  padding: 0;
+  overflow: hidden;
+}
+
+/* ── Map view ─────────────────────────────────────────────────────────────── */
+
+.map-view {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.map-status-bar {
+  position: absolute;
+  top: 0.6rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 1rem;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
+  font-size: 0.8rem;
+  padding: 0.25rem 0.9rem;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.map-status-loading {
+  color: #555;
+}
+
+.map-status-count {
+  color: #1a1a2e;
+  font-weight: 600;
+}
+
+.map-status-error {
+  color: #b91c1c;
+}
+
+.leaflet-map {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ── Map popup ────────────────────────────────────────────────────────────── */
+
+.map-popup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 160px;
+  max-width: 260px;
+}
+
+.map-popup-name {
+  font-size: 0.88rem;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.map-popup-date {
+  font-size: 0.8rem;
+  color: #444;
+}
+
+.map-popup-gps {
+  font-size: 0.75rem;
+  color: #4f8ef7;
+}
+
+.map-popup-path {
+  font-size: 0.7rem;
+  color: #999;
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── Scan panel ───────────────────────────────────────────────────────────── */
 
 .scan-panel {
