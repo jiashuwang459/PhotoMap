@@ -7,6 +7,7 @@ pub use photos::{
     upsert_photo, query_by_time_range, query_by_bounding_box,
     query_all_photos,
     get_photo_by_path, delete_photo_by_path, list_photos_by_path_prefix,
+    query_photos_needing_review,
     BoundingBox, DbError, InsertPhoto, Page, Photo,
 };
 

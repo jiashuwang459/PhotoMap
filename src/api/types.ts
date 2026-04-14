@@ -20,6 +20,16 @@ export interface Photo {
    * modified on disk since the last scan.
    */
   file_hash: string | null;
+  /**
+   * Number of times thumbnail generation has been attempted and failed.
+   * Resets to 0 on success.
+   */
+  thumbnail_retry_count: number;
+  /**
+   * `true` when thumbnail generation has exhausted all retries.
+   * The user should inspect the file manually to resolve it.
+   */
+  thumbnail_needs_review: boolean;
 }
 
 /** Input for inserting or upserting a photo record. */
@@ -75,14 +85,20 @@ export interface ThumbnailEntryError {
   photo_id: number;
   file_path: string;
   message: string;
+  /** Retry count after this failure. */
+  retry_count: number;
+  /** Whether the photo has now been flagged for manual review. */
+  needs_review: boolean;
 }
 
 /** Summary returned by {@link generateThumbnailsBatch}. */
 export interface ThumbnailBatchReport {
   /** Thumbnails successfully generated in this batch. */
   processed: number;
-  /** Photos still without a thumbnail after this batch. */
+  /** Photos still without a thumbnail and not yet flagged. */
   remaining: number;
+  /** Photos newly flagged for manual review in this batch. */
+  needs_review_count: number;
   /** Per-photo errors that did not abort the batch. */
   errors: ThumbnailEntryError[];
 }

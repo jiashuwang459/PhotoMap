@@ -130,6 +130,24 @@ CREATE INDEX IF NOT EXISTS idx_trips_start_ts
 pub const ADD_COLUMN_TRIPS_IS_CONFIRMED: (&str, &str, &str) =
     ("trips", "is_confirmed", "INTEGER NOT NULL DEFAULT 0");
 
+/// ADD COLUMN migration: `thumbnail_retry_count` was added to `photos` in
+/// phase 7 to track how many times thumbnail generation has been attempted.
+/// Once this reaches the maximum (3), the photo is flagged for manual review.
+pub const ADD_COLUMN_THUMB_RETRY_COUNT: (&str, &str, &str) = (
+    "photos",
+    "thumbnail_retry_count",
+    "INTEGER NOT NULL DEFAULT 0",
+);
+
+/// ADD COLUMN migration: `thumbnail_needs_review` was added to `photos` in
+/// phase 7.  Set to `1` when thumbnail generation has exhausted all retries
+/// so the user can inspect the file manually.
+pub const ADD_COLUMN_THUMB_NEEDS_REVIEW: (&str, &str, &str) = (
+    "photos",
+    "thumbnail_needs_review",
+    "INTEGER NOT NULL DEFAULT 0",
+);
+
 /// All DDL statements in migration order.
 pub const ALL_MIGRATIONS: &[&str] = &[
     CREATE_PHOTOS_TABLE,

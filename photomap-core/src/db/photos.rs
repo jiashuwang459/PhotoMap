@@ -2,7 +2,10 @@ use rusqlite::{Connection, Result as SqlResult};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::schema::{ALL_MIGRATIONS, ADD_COLUMN_FILE_HASH, ADD_COLUMN_TRIPS_IS_CONFIRMED};
+use super::schema::{
+    ALL_MIGRATIONS, ADD_COLUMN_FILE_HASH, ADD_COLUMN_TRIPS_IS_CONFIRMED,
+    ADD_COLUMN_THUMB_RETRY_COUNT, ADD_COLUMN_THUMB_NEEDS_REVIEW,
+};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Error type
@@ -44,6 +47,12 @@ pub struct Photo {
     /// changes (modified files) and uses its absence to identify files
     /// that have never been hashed (new files added since last scan).
     pub file_hash: Option<String>,
+    /// Number of times thumbnail generation has been attempted and failed.
+    /// Resets to `0` when a thumbnail is successfully created.
+    pub thumbnail_retry_count: i64,
+    /// Set to `true` when thumbnail generation has failed [`MAX_THUMB_RETRIES`]
+    /// times in a row.  The user should inspect the file manually.
+    pub thumbnail_needs_review: bool,
 }
 
 /// Input for inserting / upserting a photo record.
@@ -105,6 +114,10 @@ pub fn run_migrations(conn: &Connection) -> SqlResult<()> {
     let (table, column, type_def) = ADD_COLUMN_FILE_HASH;
     add_column_if_missing(conn, table, column, type_def)?;
     let (table, column, type_def) = ADD_COLUMN_TRIPS_IS_CONFIRMED;
+    add_column_if_missing(conn, table, column, type_def)?;
+    let (table, column, type_def) = ADD_COLUMN_THUMB_RETRY_COUNT;
+    add_column_if_missing(conn, table, column, type_def)?;
+    let (table, column, type_def) = ADD_COLUMN_THUMB_NEEDS_REVIEW;
     add_column_if_missing(conn, table, column, type_def)?;
     Ok(())
 }
@@ -215,7 +228,8 @@ pub fn query_by_time_range(
 ) -> Result<Vec<Photo>, DbError> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, file_path, timestamp, latitude, longitude,
-                thumbnail_path, blur_score, trip_id, file_hash
+                thumbnail_path, blur_score, trip_id, file_hash,
+                thumbnail_retry_count, thumbnail_needs_review
          FROM   photos
          WHERE  timestamp BETWEEN ?1 AND ?2
          ORDER  BY timestamp ASC
@@ -252,7 +266,8 @@ pub fn query_by_bounding_box(
 ) -> Result<Vec<Photo>, DbError> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, file_path, timestamp, latitude, longitude,
-                thumbnail_path, blur_score, trip_id, file_hash
+                thumbnail_path, blur_score, trip_id, file_hash,
+                thumbnail_retry_count, thumbnail_needs_review
          FROM   photos
          WHERE  latitude  BETWEEN ?1 AND ?2
            AND  longitude BETWEEN ?3 AND ?4
@@ -286,7 +301,8 @@ pub fn query_by_bounding_box(
 pub fn query_all_photos(conn: &Connection, page: &Page) -> Result<Vec<Photo>, DbError> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, file_path, timestamp, latitude, longitude,
-                thumbnail_path, blur_score, trip_id, file_hash
+                thumbnail_path, blur_score, trip_id, file_hash,
+                thumbnail_retry_count, thumbnail_needs_review
          FROM   photos
          ORDER  BY timestamp ASC NULLS LAST, file_path ASC
          LIMIT  ?1 OFFSET ?2",
@@ -311,7 +327,8 @@ pub fn query_all_photos(conn: &Connection, page: &Page) -> Result<Vec<Photo>, Db
 pub fn get_photo_by_path(conn: &Connection, file_path: &str) -> Result<Option<Photo>, DbError> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, file_path, timestamp, latitude, longitude,
-                thumbnail_path, blur_score, trip_id, file_hash
+                thumbnail_path, blur_score, trip_id, file_hash,
+                thumbnail_retry_count, thumbnail_needs_review
          FROM   photos
          WHERE  file_path = ?1
          LIMIT  1",
@@ -343,7 +360,8 @@ pub fn list_photos_by_path_prefix(
     );
     let mut stmt = conn.prepare_cached(
         "SELECT id, file_path, timestamp, latitude, longitude,
-                thumbnail_path, blur_score, trip_id, file_hash
+                thumbnail_path, blur_score, trip_id, file_hash,
+                thumbnail_retry_count, thumbnail_needs_review
          FROM   photos
          WHERE  file_path LIKE ?1 ESCAPE '\\'
          ORDER  BY file_path ASC
@@ -403,12 +421,42 @@ fn map_row(row: &rusqlite::Row<'_>) -> SqlResult<Photo> {
         blur_score: row.get(6)?,
         trip_id: row.get(7)?,
         file_hash: row.get(8)?,
+        thumbnail_retry_count: row.get(9)?,
+        thumbnail_needs_review: row.get::<_, i64>(10).map(|v| v != 0)?,
     })
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Unit tests
+// Reads — thumbnail review queue
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Return photos that have exhausted all thumbnail-generation retries and are
+/// flagged for manual review by the user.
+///
+/// Results are ordered by `file_path` and paginated.
+pub fn query_photos_needing_review(
+    conn: &Connection,
+    page: &Page,
+) -> Result<Vec<Photo>, DbError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, file_path, timestamp, latitude, longitude,
+                thumbnail_path, blur_score, trip_id, file_hash,
+                thumbnail_retry_count, thumbnail_needs_review
+         FROM   photos
+         WHERE  thumbnail_needs_review = 1
+         ORDER  BY file_path ASC
+         LIMIT  ?1 OFFSET ?2",
+    )?;
+
+    let photos = stmt
+        .query_map(
+            rusqlite::params![page.clamped_limit(), page.offset],
+            map_row,
+        )?
+        .collect::<SqlResult<Vec<_>>>()?;
+
+    Ok(photos)
+}
 
 #[cfg(test)]
 mod tests {

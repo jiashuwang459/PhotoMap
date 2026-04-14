@@ -9,7 +9,7 @@ use photomap_core::{
     create_trip, list_trips, get_trip, delete_trip,
     confirm_trip, rename_trip, set_photo_trip,
     query_photos_by_trip, query_untripped_photos, auto_group_trips,
-    generate_thumbnails_batch,
+    generate_thumbnails_batch, query_photos_needing_review,
     BoundingBox, DbError, InsertPhoto, Page, Photo, ScanError, ScanReport, Trip,
     ThumbnailBatchReport, ThumbnailError,
 };
@@ -340,4 +340,20 @@ pub fn cmd_generate_thumbnails_batch(
 ) -> Result<ThumbnailBatchReport, ThumbnailError> {
     let conn = db_state.0.lock().expect("db mutex poisoned");
     generate_thumbnails_batch(&conn, &thumb_state.0, batch_size)
+}
+
+/// Return photos that have been flagged for manual review because thumbnail
+/// generation exceeded the maximum retry count.
+///
+/// Results are ordered by `file_path` and paginated.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_query_photos_needing_review(
+    state: State<'_, DbState>,
+    page: Page,
+) -> Result<Vec<Photo>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    query_photos_needing_review(&conn, &page)
 }

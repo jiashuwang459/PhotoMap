@@ -215,3 +215,13 @@ export async function generateThumbnailsBatch(
 ): Promise<ThumbnailBatchReport> {
   return invoke<ThumbnailBatchReport>("cmd_generate_thumbnails_batch", { batchSize });
 }
+
+/**
+ * Return photos whose thumbnail generation has failed the maximum number of
+ * times and have been flagged for manual review.
+ *
+ * Paginated.
+ */
+export async function queryPhotosNeedingReview(page: Page): Promise<Photo[]> {
+  return invoke<Photo[]>("cmd_query_photos_needing_review", { page });
+}

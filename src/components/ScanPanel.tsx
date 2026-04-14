@@ -243,7 +243,22 @@ export function ScanPanel() {
                 value={thumbReport.errors.length}
                 colour={thumbReport.errors.length > 0 ? "red" : "gray"}
               />
+              {thumbReport.needs_review_count > 0 && (
+                <ReportStat
+                  label="Needs review"
+                  value={thumbReport.needs_review_count}
+                  colour="orange"
+                />
+              )}
             </div>
+            {thumbReport.needs_review_count > 0 && (
+              <p className="scan-hint">
+                ⚠️ {thumbReport.needs_review_count} photo
+                {thumbReport.needs_review_count !== 1 ? "s" : ""} failed too
+                many times and have been flagged for review. Check the Library
+                tab for photos marked with ⚠️.
+              </p>
+            )}
             {thumbReport.errors.length > 0 && (
               <details className="scan-errors-details">
                 <summary>
@@ -254,7 +269,12 @@ export function ScanPanel() {
                   {thumbReport.errors.map((err, i) => (
                     <li key={i}>
                       <code>{err.file_path}</code>
-                      <span className="scan-error-msg">{err.message}</span>
+                      <span className="scan-error-msg">
+                        {err.message}
+                        {err.needs_review && (
+                          <span className="scan-needs-review-badge"> ⚠️ flagged for review</span>
+                        )}
+                      </span>
                     </li>
                   ))}
                 </ul>

@@ -187,7 +187,8 @@ pub fn query_photos_by_trip(
 ) -> Result<Vec<Photo>, DbError> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, file_path, timestamp, latitude, longitude,
-                thumbnail_path, blur_score, trip_id, file_hash
+                thumbnail_path, blur_score, trip_id, file_hash,
+                thumbnail_retry_count, thumbnail_needs_review
          FROM   photos
          WHERE  trip_id = ?1
          ORDER  BY timestamp ASC NULLS LAST, file_path ASC
@@ -207,7 +208,8 @@ pub fn query_photos_by_trip(
 pub fn query_untripped_photos(conn: &Connection, page: &Page) -> Result<Vec<Photo>, DbError> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, file_path, timestamp, latitude, longitude,
-                thumbnail_path, blur_score, trip_id, file_hash
+                thumbnail_path, blur_score, trip_id, file_hash,
+                thumbnail_retry_count, thumbnail_needs_review
          FROM   photos
          WHERE  trip_id IS NULL
          ORDER  BY timestamp ASC NULLS LAST, file_path ASC
