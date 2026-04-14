@@ -7,7 +7,7 @@ use tauri::Manager;
 use commands::{
     DbState,
     cmd_upsert_photo, cmd_query_by_time_range, cmd_query_by_bounding_box,
-    cmd_scan_directory, cmd_delete_photo,
+    cmd_scan_directory, cmd_delete_photo, cmd_query_all_photos,
 };
 use photomap_core::db as core_db;
 
@@ -44,6 +44,7 @@ pub fn run() {
             cmd_query_by_bounding_box,
             cmd_scan_directory,
             cmd_delete_photo,
+            cmd_query_all_photos,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

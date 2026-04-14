@@ -275,6 +275,31 @@ pub fn query_by_bounding_box(
     Ok(photos)
 }
 
+/// Return all photos ordered by timestamp ascending (NULL timestamps last),
+/// then by file path ascending.
+///
+/// Useful for the library browser when no filter is active.  Results are
+/// paginated; callers should iterate with increasing `page.offset` until
+/// fewer than `page.limit` rows are returned.
+pub fn query_all_photos(conn: &Connection, page: &Page) -> Result<Vec<Photo>, DbError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, file_path, timestamp, latitude, longitude,
+                thumbnail_path, blur_score, trip_id, file_hash
+         FROM   photos
+         ORDER  BY timestamp ASC NULLS LAST, file_path ASC
+         LIMIT  ?1 OFFSET ?2",
+    )?;
+
+    let photos = stmt
+        .query_map(
+            rusqlite::params![page.clamped_limit(), page.offset],
+            map_row,
+        )?
+        .collect::<SqlResult<Vec<_>>>()?;
+
+    Ok(photos)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Reads — lookup by path
 // ──────────────────────────────────────────────────────────────────────────────
@@ -557,5 +582,44 @@ mod tests {
             .expect("query");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].file_hash, None);
+    }
+
+    // ── query_all_photos tests ────────────────────────────────────────────────
+
+    #[test]
+    fn query_all_returns_all_photos() {
+        let conn = mem_db();
+        insert_sample(&conn, "/photos/a.jpg", Some(100), None, None);
+        insert_sample(&conn, "/photos/b.jpg", None, None, None);
+        insert_sample(&conn, "/photos/c.jpg", Some(200), None, None);
+
+        let results = query_all_photos(&conn, &Page { limit: 50, offset: 0 }).expect("query");
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn query_all_null_timestamps_come_last() {
+        let conn = mem_db();
+        insert_sample(&conn, "/photos/no_ts.jpg", None, None, None);
+        insert_sample(&conn, "/photos/has_ts.jpg", Some(500), None, None);
+
+        let results = query_all_photos(&conn, &Page { limit: 50, offset: 0 }).expect("query");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].timestamp, Some(500));
+        assert_eq!(results[1].timestamp, None);
+    }
+
+    #[test]
+    fn query_all_pagination() {
+        let conn = mem_db();
+        for i in 0i64..5 {
+            insert_sample(&conn, &format!("/photos/{i}.jpg"), Some(i * 100), None, None);
+        }
+
+        let page1 = query_all_photos(&conn, &Page { limit: 3, offset: 0 }).expect("p1");
+        let page2 = query_all_photos(&conn, &Page { limit: 3, offset: 3 }).expect("p2");
+
+        assert_eq!(page1.len(), 3);
+        assert_eq!(page2.len(), 2);
     }
 }

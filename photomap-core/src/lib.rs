@@ -4,6 +4,7 @@ pub mod scanner;
 pub use db::{
     open, run_migrations,
     upsert_photo, query_by_time_range, query_by_bounding_box,
+    query_all_photos,
     get_photo_by_path, delete_photo_by_path, list_photos_by_path_prefix,
     BoundingBox, DbError, InsertPhoto, Page, Photo,
 };

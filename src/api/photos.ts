@@ -46,6 +46,17 @@ export async function queryByBoundingBox(
 }
 
 /**
+ * Fetch all photos ordered by timestamp ascending (no timestamp → end),
+ * then by file path.
+ *
+ * Paginated: increment `page.offset` by `page.limit` on each call until fewer
+ * than `page.limit` results are returned.
+ */
+export async function queryAllPhotos(page: Page): Promise<Photo[]> {
+  return invoke<Photo[]>("cmd_query_all_photos", { page });
+}
+
+/**
  * Scan a directory recursively for image files, synchronising the database:
  * - New files are inserted.
  * - Modified files (hash changed) are updated.

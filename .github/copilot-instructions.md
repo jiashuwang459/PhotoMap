@@ -19,7 +19,12 @@ PhotoMap/
 │   ├── api/
 │   │   ├── photos.ts         # Typed wrappers for every Tauri command
 │   │   └── types.ts          # Shared TypeScript interfaces (mirrors Rust structs)
-│   ├── App.tsx
+│   ├── components/
+│   │   ├── FilterBar.tsx     # Date-range filter UI
+│   │   ├── PhotoCard.tsx     # Single photo metadata card
+│   │   ├── PhotoGrid.tsx     # Paginated photo grid with filter wiring
+│   │   └── ScanPanel.tsx     # Directory scanner form + report display
+│   ├── App.tsx               # Root component: tab navigation
 │   └── main.tsx
 ├── src-tauri/                # Tauri application crate
 │   ├── src/
@@ -30,6 +35,7 @@ PhotoMap/
 ├── photomap-core/            # Pure Rust library crate (no Tauri dependency)
 │   └── src/
 │       ├── db/
+│       │   ├── mod.rs        # Re-exports all public DB symbols
 │       │   ├── photos.rs     # All SQL queries and DB helpers
 │       │   └── schema.rs     # DDL migrations as string constants
 │       ├── scanner.rs        # Background file scanner (SHA-256, EXIF, DB sync)
@@ -68,6 +74,19 @@ PhotoMap/
 4. Register it in the `invoke_handler!` macro inside `src-tauri/src/lib.rs`.
 5. Add a typed wrapper function in `src/api/photos.ts`.
 6. Add / update the relevant TypeScript interface in `src/api/types.ts`.
+
+## Keeping documentation current
+
+Whenever you add, remove, or change any of the following, update **both**
+`.github/copilot-instructions.md` and `README.md` in the same commit:
+
+- A new Tauri command or API wrapper
+- A new `photomap-core` public function or type
+- A change to the repository layout (new files / directories)
+- A change to the build, run, or test commands
+- A new runtime dependency (Rust crate or npm package)
+
+Small fixes (typos, phrasing) only need the affected document updated.
 
 ## Running tests
 

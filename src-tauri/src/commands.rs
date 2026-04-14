@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use tauri::State;
 
 use photomap_core::{
-    upsert_photo, query_by_time_range, query_by_bounding_box,
+    upsert_photo, query_by_time_range, query_by_bounding_box, query_all_photos,
     delete_photo_by_path, scan_directory,
     BoundingBox, DbError, InsertPhoto, Page, Photo, ScanError, ScanReport,
 };
@@ -105,4 +105,18 @@ pub fn cmd_delete_photo(
 ) -> Result<bool, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
     delete_photo_by_path(&conn, &file_path)
+}
+
+/// Return all photos ordered by timestamp ascending (NULL timestamps last),
+/// then by file path.
+///
+/// Results are paginated.  Pass increasing `page.offset` values and stop when
+/// the returned slice is shorter than `page.limit`.
+#[tauri::command]
+pub fn cmd_query_all_photos(
+    state: State<'_, DbState>,
+    page: Page,
+) -> Result<Vec<Photo>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    query_all_photos(&conn, &page)
 }

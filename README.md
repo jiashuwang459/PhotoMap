@@ -12,6 +12,7 @@ A cross-platform desktop application for managing and exploring your photo libra
 - [Prerequisites](#prerequisites)
 - [Getting started](#getting-started)
 - [Running in development](#running-in-development)
+- [Using the app](#using-the-app)
 - [Building for production](#building-for-production)
 - [Running tests](#running-tests)
 - [Architecture notes](#architecture-notes)
@@ -20,7 +21,8 @@ A cross-platform desktop application for managing and exploring your photo libra
 
 ## Features
 
-- **Directory scanner** — recursively indexes a folder of photos, extracting EXIF timestamps and GPS coordinates via SHA-256 content hashing for fast incremental re-scans.
+- **Library browser** — paginated photo grid showing all indexed photos with name, date, and GPS badge; filter by date range.
+- **Directory scanner** — recursively indexes a folder of photos, extracting EXIF timestamps and GPS coordinates via SHA-256 content hashing for fast incremental re-scans; displays an add/update/remove/error summary.
 - **Time-range queries** — retrieve photos by date range, paginated and ordered by timestamp.
 - **Bounding-box queries** — retrieve geotagged photos by map viewport (WGS-84 lat/lon bounding box).
 - **Local SQLite database** — no cloud account required; all data stays on your machine.
@@ -51,7 +53,12 @@ PhotoMap/
 │   ├── api/
 │   │   ├── photos.ts         # Typed wrappers for every Tauri command
 │   │   └── types.ts          # TypeScript interfaces mirroring Rust structs
-│   ├── App.tsx
+│   ├── components/
+│   │   ├── FilterBar.tsx     # Date-range filter UI
+│   │   ├── PhotoCard.tsx     # Single photo metadata card
+│   │   ├── PhotoGrid.tsx     # Paginated photo grid with filter wiring
+│   │   └── ScanPanel.tsx     # Directory scanner form + report display
+│   ├── App.tsx               # Root component: tab navigation (Library | Scan)
 │   └── main.tsx
 ├── src-tauri/                # Tauri application crate
 │   ├── src/
@@ -62,6 +69,7 @@ PhotoMap/
 ├── photomap-core/            # Pure Rust library (no Tauri dependency)
 │   └── src/
 │       ├── db/
+│       │   ├── mod.rs        # Re-exports all public DB symbols
 │       │   ├── photos.rs     # SQL queries, upserts, migrations
 │       │   └── schema.rs     # DDL as string constants
 │       ├── scanner.rs        # Background scanner (SHA-256, EXIF, DB sync)
@@ -115,6 +123,23 @@ The Rust backend recompiles automatically when you save Rust files.  Frontend ch
 
 ---
 
+## Using the app
+
+The application has two tabs accessible from the header navigation:
+
+| Tab | Purpose |
+|---|---|
+| **Library** | Browse all indexed photos in a paginated grid. Use the date-range filter to narrow results. |
+| **Scan** | Enter an absolute directory path and click **Scan** to index images. A summary shows how many files were added, updated, removed, or skipped. |
+
+**Typical first-run workflow:**
+1. Open the **Scan** tab.
+2. Paste the absolute path to your photo folder (e.g. `/home/alice/Pictures`).
+3. Click **Scan** and wait for the report.
+4. Switch to **Library** to browse your indexed photos.
+
+---
+
 ## Building for production
 
 ```bash
@@ -138,7 +163,7 @@ cargo test -p photomap-core
 Tests cover:
 - Database migrations (idempotency)
 - Photo upsert and update
-- Time-range and bounding-box queries
+- Time-range, bounding-box, and `query_all_photos` queries
 - Pagination and limit capping
 - `file_hash` storage and change detection
 - SHA-256 hashing (determinism, known empty-file digest)
