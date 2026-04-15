@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { scanDirectory } from "../api/photos";
+import { scanDirectory, clearAllThumbnails } from "../api/photos";
 import type { ScanReport } from "../api/types";
 import { homeDir } from '@tauri-apps/api/path';
 import { useThumbnailWorker } from "../context/ThumbnailWorkerContext";
@@ -51,6 +51,21 @@ export function ScanPanel() {
   const { isRunning: thumbRunning, done: thumbDone, total: thumbTotal, status: thumbStatus, start: startThumbnails, cancel: cancelThumbnails } = useThumbnailWorker();
 
   const thumbPercent = thumbTotal > 0 ? Math.round((thumbDone / thumbTotal) * 100) : 0;
+
+  const [isClearing, setIsClearing] = useState(false);
+  const [clearCount, setClearCount] = useState<number | null>(null);
+
+  async function handleClearAllThumbnails() {
+    if (!window.confirm("Delete all thumbnails? The background worker will regenerate them automatically.")) return;
+    setIsClearing(true);
+    setClearCount(null);
+    try {
+      const count = await clearAllThumbnails();
+      setClearCount(count);
+    } finally {
+      setIsClearing(false);
+    }
+  }
 
   async function handleScan(path?: string) {
     const trimmed = (path ?? dir).trim();
@@ -263,6 +278,24 @@ export function ScanPanel() {
             </div>
           </div>
         )}
+
+        <div className="thumb-clear-section">
+          <button
+            className="thumb-clear-button"
+            onClick={() => { void handleClearAllThumbnails(); }}
+            disabled={isClearing || thumbRunning}
+            title="Delete all thumbnails from disk and database"
+          >
+            {isClearing ? "Clearing…" : "Clear all thumbnails"}
+          </button>
+          {clearCount !== null && (
+            <span className="thumb-clear-status">
+              {clearCount === 0
+                ? "No thumbnails to clear."
+                : `Cleared ${clearCount} thumbnail${clearCount === 1 ? "" : "s"}.`}
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -6,8 +6,9 @@ pub use photos::{
     open, run_migrations,
     upsert_photo, query_by_time_range, query_by_bounding_box,
     query_all_photos,
-    get_photo_by_path, delete_photo_by_path, list_photos_by_path_prefix,
+    get_photo_by_path, get_photo_by_id, delete_photo_by_path, list_photos_by_path_prefix,
     query_photos_needing_review,
+    delete_thumbnail, clear_all_thumbnails,
     BoundingBox, DbError, InsertPhoto, Page, Photo,
 };
 

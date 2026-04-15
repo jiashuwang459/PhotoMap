@@ -5,6 +5,8 @@ import { PhotoCard } from "./PhotoCard";
 import { PhotoViewer } from "./PhotoViewer";
 import type { FilterState } from "./FilterBar";
 import { FilterBar } from "./FilterBar";
+import { useThumbnailWorker } from "../context/ThumbnailWorkerContext";
+import { deleteThumbnail } from "../api/photos";
 
 const PAGE_SIZE = 50;
 
@@ -27,6 +29,8 @@ export function PhotoGrid() {
     fromDate: "",
     toDate: "",
   });
+
+  const { refreshKey } = useThumbnailWorker();
 
   /** Fetch a page of photos according to the current filter. */
   const fetchPage = useCallback(
@@ -63,7 +67,18 @@ export function PhotoGrid() {
     void fetchPage(0, true);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /** Auto-reload the first page whenever the thumbnail worker completes a run. */
+  useEffect(() => {
+    if (refreshKey > 0) {
+      void fetchPage(0, true);
+    }
+  }, [refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
   function handleApply() {
+    void fetchPage(0, true);
+  }
+
+  function handleRefresh() {
     void fetchPage(0, true);
   }
 
@@ -77,9 +92,31 @@ export function PhotoGrid() {
     setSelectedPhoto(updated);
   }
 
+  /** When a thumbnail is deleted from a card, update the cached photo. */
+  function handleThumbnailDeleted(updated: Photo) {
+    setPhotos((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+    if (selectedPhoto?.id === updated.id) setSelectedPhoto(updated);
+  }
+
+  async function handleDeleteThumbnail(photo: Photo) {
+    const updated = await deleteThumbnail(photo.id);
+    if (updated) handleThumbnailDeleted(updated);
+  }
+
   return (
     <div className="photo-grid-container">
       <FilterBar filter={filter} onChange={setFilter} onApply={handleApply} />
+
+      <div className="grid-toolbar">
+        <button
+          className="grid-refresh-button"
+          onClick={handleRefresh}
+          disabled={loading}
+          title="Reload library"
+        >
+          ↻ Refresh
+        </button>
+      </div>
 
       {error && (
         <div className="grid-error" role="alert">
@@ -98,7 +135,12 @@ export function PhotoGrid() {
 
       <div className="photo-grid">
         {photos.map((p) => (
-          <PhotoCard key={p.id} photo={p} onClick={setSelectedPhoto} />
+          <PhotoCard
+            key={p.id}
+            photo={p}
+            onClick={setSelectedPhoto}
+            onDeleteThumbnail={handleDeleteThumbnail}
+          />
         ))}
       </div>
 

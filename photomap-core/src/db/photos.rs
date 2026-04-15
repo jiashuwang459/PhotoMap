@@ -427,6 +427,79 @@ fn map_row(row: &rusqlite::Row<'_>) -> SqlResult<Photo> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Writes — thumbnail management
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Look up a single photo by its integer primary-key `id`.
+///
+/// Returns `None` if no photo with that id exists.
+pub fn get_photo_by_id(conn: &Connection, photo_id: i64) -> Result<Option<Photo>, DbError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, file_path, timestamp, latitude, longitude,
+                thumbnail_path, blur_score, trip_id, file_hash,
+                thumbnail_retry_count, thumbnail_needs_review
+         FROM   photos
+         WHERE  id = ?1",
+    )?;
+    let result = stmt.query_row(rusqlite::params![photo_id], map_row);
+    match result {
+        Ok(photo) => Ok(Some(photo)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(DbError::from(e)),
+    }
+}
+
+
+/// `thumbnail_path` (if any) so the caller can remove the file from disk.
+///
+/// Resets `thumbnail_retry_count` to `0` and `thumbnail_needs_review` to
+/// `false` so the background worker will re-generate the thumbnail on its
+/// next run.
+///
+/// Returns `None` if no photo with `photo_id` exists.
+pub fn delete_thumbnail(
+    conn: &Connection,
+    photo_id: i64,
+) -> Result<Option<String>, DbError> {
+    let mut stmt = conn.prepare_cached(
+        "UPDATE photos
+         SET    thumbnail_path        = NULL,
+                thumbnail_retry_count = 0,
+                thumbnail_needs_review = 0
+         WHERE  id = ?1
+         RETURNING thumbnail_path",
+    )?;
+    let result = stmt.query_row(rusqlite::params![photo_id], |row| {
+        row.get::<_, Option<String>>(0)
+    });
+    match result {
+        Ok(path) => Ok(path),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(DbError::from(e)),
+    }
+}
+
+/// Clear thumbnails for **all** photos and return the list of previous
+/// `thumbnail_path` values so the caller can remove the files from disk.
+///
+/// Resets `thumbnail_retry_count` and `thumbnail_needs_review` for every row
+/// so the background worker will regenerate thumbnails on its next run.
+pub fn clear_all_thumbnails(conn: &Connection) -> Result<Vec<String>, DbError> {
+    let mut stmt = conn.prepare_cached(
+        "UPDATE photos
+         SET    thumbnail_path         = NULL,
+                thumbnail_retry_count  = 0,
+                thumbnail_needs_review = 0
+         WHERE  thumbnail_path IS NOT NULL
+         RETURNING thumbnail_path",
+    )?;
+    let paths = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<SqlResult<Vec<_>>>()?;
+    Ok(paths)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Reads — thumbnail review queue
 // ──────────────────────────────────────────────────────────────────────────────
 

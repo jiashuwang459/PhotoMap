@@ -15,6 +15,7 @@ use commands::{
     cmd_generate_thumbnails_batch, cmd_query_photos_needing_review,
     cmd_generate_thumbnail_for_photo, cmd_suggest_photos_for_trips,
     cmd_start_thumbnail_worker, cmd_cancel_thumbnail_worker,
+    cmd_delete_thumbnail, cmd_clear_all_thumbnails,
 };
 use photomap_core::db as core_db;
 use thumbnail_worker::thumbnail_worker_loop;
@@ -96,6 +97,8 @@ pub fn run() {
             cmd_suggest_photos_for_trips,
             cmd_start_thumbnail_worker,
             cmd_cancel_thumbnail_worker,
+            cmd_delete_thumbnail,
+            cmd_clear_all_thumbnails,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

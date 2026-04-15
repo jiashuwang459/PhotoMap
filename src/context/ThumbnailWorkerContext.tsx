@@ -55,6 +55,12 @@ export interface ThumbnailWorkerState {
   total: number;
   /** Short human-readable status message (empty when idle). */
   status: string;
+  /**
+   * Increments each time a thumbnail generation run completes (`thumbnail_done`
+   * event).  Components can watch this value to automatically refresh their
+   * photo lists.
+   */
+  refreshKey: number;
   /** Start (or restart) the background generation worker. */
   start: () => void;
   /** Request cancellation of the running worker. */
@@ -76,6 +82,7 @@ export function ThumbnailWorkerProvider({
   const [done, setDone] = useState(0);
   const [total, setTotal] = useState(0);
   const [status, setStatus] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
 
   // Track whether we're currently running so callbacks close over latest value.
   const isRunningRef = useRef(false);
@@ -106,6 +113,7 @@ export function ThumbnailWorkerProvider({
           setDone(event.payload.done);
           setStatus(event.payload.cancelled ? "Cancelled" : "Done");
           setIsRunning(false);
+          setRefreshKey((k) => k + 1);
         })
       );
 
@@ -143,7 +151,7 @@ export function ThumbnailWorkerProvider({
 
   return (
     <ThumbnailWorkerContext.Provider
-      value={{ isRunning, done, total, status, start, cancel }}
+      value={{ isRunning, done, total, status, refreshKey, start, cancel }}
     >
       {children}
     </ThumbnailWorkerContext.Provider>

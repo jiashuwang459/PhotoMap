@@ -5,12 +5,13 @@ use tauri::State;
 
 use photomap_core::{
     upsert_photo, query_by_time_range, query_by_bounding_box, query_all_photos,
-    get_photo_by_path, delete_photo_by_path, scan_directory,
+    get_photo_by_path, get_photo_by_id, delete_photo_by_path, scan_directory,
     create_trip, list_trips, get_trip, delete_trip,
     confirm_trip, rename_trip, set_photo_trip,
     query_photos_by_trip, query_untripped_photos, auto_group_trips,
     suggest_photos_for_trips,
     generate_thumbnail_for_photo, query_photos_needing_review,
+    delete_thumbnail, clear_all_thumbnails,
     BoundingBox, DbError, InsertPhoto, Page, Photo, ScanError, ScanReport, Trip,
     ThumbnailBatchReport, ThumbnailError, TripPhotoSuggestion,
 };
@@ -579,4 +580,51 @@ pub fn cmd_cancel_thumbnail_worker(
         .expect("thumbnail job sender mutex poisoned")
         .send(ThumbnailCommand::Cancel)
         .map_err(|e| e.to_string())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Thumbnail delete commands
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Clear the thumbnail for a single photo by its `photo_id`.
+///
+/// Deletes the thumbnail file from disk (best-effort), resets
+/// `thumbnail_retry_count` and `thumbnail_needs_review` so the background
+/// worker will regenerate it on the next run, and returns the updated
+/// [`Photo`] record.
+///
+/// # Errors
+/// Returns the database error if the update fails.  Returns `None` in the
+/// `Ok` variant if no photo with the given id exists.
+#[tauri::command]
+pub fn cmd_delete_thumbnail(
+    state: State<'_, DbState>,
+    photo_id: i64,
+) -> Result<Option<Photo>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    if let Some(old_path) = delete_thumbnail(&conn, photo_id)? {
+        let _ = std::fs::remove_file(&old_path);
+    }
+    get_photo_by_id(&conn, photo_id)
+}
+
+/// Clear thumbnails for **all** photos.
+///
+/// Deletes every thumbnail file from disk (best-effort) and resets the
+/// thumbnail fields in the database so the background worker can regenerate
+/// them.  Returns the number of thumbnails that were cleared.
+///
+/// # Errors
+/// Returns the database error if the bulk update fails.
+#[tauri::command]
+pub fn cmd_clear_all_thumbnails(
+    state: State<'_, DbState>,
+) -> Result<u32, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    let paths = clear_all_thumbnails(&conn)?;
+    let count = paths.len() as u32;
+    for path in paths {
+        let _ = std::fs::remove_file(&path);
+    }
+    Ok(count)
 }

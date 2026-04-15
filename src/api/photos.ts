@@ -270,3 +270,25 @@ export async function startThumbnailWorker(batchSize: number): Promise<void> {
 export async function cancelThumbnailWorker(): Promise<void> {
   return invoke<void>("cmd_cancel_thumbnail_worker");
 }
+
+/**
+ * Clear the thumbnail for a single photo by its id.
+ *
+ * Removes the thumbnail file from disk and resets the retry counter so
+ * the background worker will regenerate it.  Returns the updated Photo
+ * record, or `null` if no photo with the given id exists.
+ */
+export async function deleteThumbnail(photoId: number): Promise<Photo | null> {
+  return invoke<Photo | null>("cmd_delete_thumbnail", { photoId });
+}
+
+/**
+ * Clear all thumbnails across the entire library.
+ *
+ * Removes every thumbnail file from disk and resets retry counters so the
+ * background worker can regenerate them all.  Returns the number of
+ * thumbnails that were cleared.
+ */
+export async function clearAllThumbnails(): Promise<number> {
+  return invoke<number>("cmd_clear_all_thumbnails");
+}
