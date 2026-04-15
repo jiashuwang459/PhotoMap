@@ -15,6 +15,8 @@ use photomap_core::{
     ThumbnailBatchReport, ThumbnailError, TripPhotoSuggestion,
 };
 
+use crate::thumbnail_worker::ThumbnailCommand;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Managed state
 // ──────────────────────────────────────────────────────────────────────────────
@@ -33,6 +35,12 @@ pub struct DbState(pub Mutex<Connection>);
 /// state so that thumbnail commands can resolve output paths without needing
 /// the Tauri `App` handle inside commands.
 pub struct ThumbnailDirState(pub PathBuf);
+
+/// Channel sender used to control the background thumbnail worker thread.
+///
+/// Sending [`ThumbnailCommand::Start`] starts (or restarts) the generation
+/// loop; [`ThumbnailCommand::Cancel`] requests an early stop.
+pub struct ThumbnailJobSender(pub Mutex<std::sync::mpsc::Sender<ThumbnailCommand>>);
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Tauri commands
@@ -395,4 +403,57 @@ pub fn cmd_suggest_photos_for_trips(
 ) -> Result<Vec<TripPhotoSuggestion>, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
     suggest_photos_for_trips(&conn)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Background thumbnail worker commands
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Start (or restart) the background thumbnail-generation worker.
+///
+/// The worker runs on a dedicated OS thread and emits Tauri events as it
+/// progresses:
+///
+/// * `thumbnail_progress` — [`crate::thumbnail_worker::ThumbnailProgress`]
+/// * `thumbnail_done`     — [`crate::thumbnail_worker::ThumbnailDone`]
+/// * `thumbnail_error`    — `String`
+///
+/// Calling this command while the worker is already running causes it to
+/// restart from the beginning (useful after a new scan adds more photos).
+///
+/// # Errors
+/// Returns an error string if the worker channel has been unexpectedly
+/// disconnected.
+#[tauri::command]
+pub fn cmd_start_thumbnail_worker(
+    state: State<'_, ThumbnailJobSender>,
+    batch_size: u32,
+) -> Result<(), String> {
+    state
+        .0
+        .lock()
+        .expect("thumbnail job sender mutex poisoned")
+        .send(ThumbnailCommand::Start { batch_size })
+        .map_err(|e| e.to_string())
+}
+
+/// Request that the background thumbnail-generation worker stop after its
+/// current batch completes.
+///
+/// A `thumbnail_done` event with `cancelled: true` will be emitted once the
+/// worker has actually stopped.
+///
+/// # Errors
+/// Returns an error string if the worker channel has been unexpectedly
+/// disconnected.
+#[tauri::command]
+pub fn cmd_cancel_thumbnail_worker(
+    state: State<'_, ThumbnailJobSender>,
+) -> Result<(), String> {
+    state
+        .0
+        .lock()
+        .expect("thumbnail job sender mutex poisoned")
+        .send(ThumbnailCommand::Cancel)
+        .map_err(|e| e.to_string())
 }

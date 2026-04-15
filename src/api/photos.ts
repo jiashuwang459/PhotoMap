@@ -248,3 +248,25 @@ export async function generateThumbnailForPhoto(photoId: number): Promise<string
 export async function suggestPhotosForTrips(): Promise<import("./types").TripPhotoSuggestion[]> {
   return invoke<import("./types").TripPhotoSuggestion[]>("cmd_suggest_photos_for_trips");
 }
+
+/**
+ * Tell the background thumbnail worker to start (or restart) generating
+ * thumbnails.  Progress is reported via Tauri events:
+ *
+ * - `thumbnail_progress` — `{ done, remaining, total }`
+ * - `thumbnail_done`     — `{ done, cancelled }`
+ * - `thumbnail_error`    — `string`
+ *
+ * @param batchSize Photos to process per backend iteration (default: 10).
+ */
+export async function startThumbnailWorker(batchSize: number): Promise<void> {
+  return invoke<void>("cmd_start_thumbnail_worker", { batchSize });
+}
+
+/**
+ * Ask the background thumbnail worker to stop after its current batch.
+ * A `thumbnail_done` event with `cancelled: true` will follow shortly.
+ */
+export async function cancelThumbnailWorker(): Promise<void> {
+  return invoke<void>("cmd_cancel_thumbnail_worker");
+}

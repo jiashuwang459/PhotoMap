@@ -1,33 +1,51 @@
 /**
- * Global background thumbnail-generation worker.
+ * Global background thumbnail-generation worker bridge.
  *
- * Wrapping the app in `<ThumbnailWorkerProvider>` gives any component access
- * to the thumbnail-generation loop via `useThumbnailWorker()`.  The loop runs
- * independently of which tab is currently visible: switching tabs does NOT
- * pause or cancel it.
+ * The actual thumbnail decoding happens on a **dedicated Rust OS thread** that
+ * owns its own SQLite connection — it never blocks the main application
+ * connection.  This context acts as the React-side bridge: it subscribes to
+ * Tauri events emitted by that thread and exposes a clean `start` / `cancel`
+ * API to the rest of the UI.
+ *
+ * ## Events (Tauri → React)
+ * | Event                | Payload                                   |
+ * |----------------------|-------------------------------------------|
+ * | `thumbnail_progress` | `{ done, remaining, total }`              |
+ * | `thumbnail_done`     | `{ done, cancelled }`                     |
+ * | `thumbnail_error`    | `string`                                  |
  *
  * ## Usage
  * ```tsx
  * const { isRunning, done, total, status, start, cancel } = useThumbnailWorker();
  * ```
- *
- * - `start()` — begin (or resume) generating thumbnails in the background.
- * - `cancel()` — request cancellation; the loop stops after the current batch.
  */
 
 import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useRef,
   useState,
 } from "react";
-import { generateThumbnailsBatch } from "../api/photos";
+import { listen } from "@tauri-apps/api/event";
+import { startThumbnailWorker, cancelThumbnailWorker } from "../api/photos";
 
-/** Number of photos to decode per backend call. Small = less CPU spike per tick. */
-const BATCH_SIZE = 5;
-/** Milliseconds to yield between batches so the UI thread can repaint. */
-const BATCH_DELAY_MS = 200;
+/** Photos to process per backend batch. Larger = fewer round-trips. */
+const BATCH_SIZE = 10;
+
+// ── Event payload types ───────────────────────────────────────────────────────
+
+interface ThumbnailProgressPayload {
+  done: number;
+  remaining: number;
+  total: number;
+}
+
+interface ThumbnailDonePayload {
+  done: number;
+  cancelled: boolean;
+}
 
 // ── Context value shape ───────────────────────────────────────────────────────
 
@@ -37,9 +55,9 @@ export interface ThumbnailWorkerState {
   total: number;
   /** Short human-readable status message (empty when idle). */
   status: string;
-  /** Start (or restart) the generation loop. */
+  /** Start (or restart) the background generation worker. */
   start: () => void;
-  /** Request cancellation of the running loop. */
+  /** Request cancellation of the running worker. */
   cancel: () => void;
 }
 
@@ -59,48 +77,68 @@ export function ThumbnailWorkerProvider({
   const [total, setTotal] = useState(0);
   const [status, setStatus] = useState("");
 
-  /**
-   * When set to `true` by `cancel()`, the next iteration of the async loop
-   * will exit without scheduling another batch.
-   */
-  const cancelRef = useRef(false);
+  // Track whether we're currently running so callbacks close over latest value.
+  const isRunningRef = useRef(false);
+  useEffect(() => {
+    isRunningRef.current = isRunning;
+  }, [isRunning]);
+
+  // ── Subscribe to Tauri events once on mount ───────────────────────────────
+  useEffect(() => {
+    type Unlisten = () => void;
+    const unlisteners: Unlisten[] = [];
+
+    void (async () => {
+      unlisteners.push(
+        await listen<ThumbnailProgressPayload>(
+          "thumbnail_progress",
+          (event) => {
+            const { done: d, remaining, total: t } = event.payload;
+            setDone(d);
+            setTotal(t);
+            setStatus(`Processing… (${remaining} remaining)`);
+          }
+        )
+      );
+
+      unlisteners.push(
+        await listen<ThumbnailDonePayload>("thumbnail_done", (event) => {
+          setDone(event.payload.done);
+          setStatus(event.payload.cancelled ? "Cancelled" : "Done");
+          setIsRunning(false);
+        })
+      );
+
+      unlisteners.push(
+        await listen<string>("thumbnail_error", (event) => {
+          setStatus(`Error: ${event.payload}`);
+          setIsRunning(false);
+        })
+      );
+    })();
+
+    return () => {
+      for (const unlisten of unlisteners) unlisten();
+    };
+  }, []); // run once on mount
+
+  // ── Public API ────────────────────────────────────────────────────────────
 
   const start = useCallback(() => {
-    // Prevent double-starting.
-    if (isRunning) return;
-    cancelRef.current = false;
+    if (isRunningRef.current) {
+      // Re-start: the worker will reset its counters.
+      void startThumbnailWorker(BATCH_SIZE);
+      return;
+    }
     setIsRunning(true);
     setDone(0);
     setTotal(0);
     setStatus("Starting…");
-
-    void (async () => {
-      try {
-        let lastReport = await generateThumbnailsBatch(BATCH_SIZE);
-        const initial = lastReport.processed + lastReport.remaining;
-        setTotal(initial);
-        setDone(lastReport.processed);
-
-        while (lastReport.remaining > 0 && !cancelRef.current) {
-          setStatus(`Processing… (${lastReport.remaining} remaining)`);
-          await new Promise<void>((resolve) =>
-            setTimeout(resolve, BATCH_DELAY_MS)
-          );
-          if (cancelRef.current) break;
-          lastReport = await generateThumbnailsBatch(BATCH_SIZE);
-          setDone((prev) => prev + lastReport.processed);
-        }
-      } catch {
-        setStatus("Error during thumbnail generation");
-      } finally {
-        setStatus(cancelRef.current ? "Cancelled" : "Done");
-        setIsRunning(false);
-      }
-    })();
-  }, [isRunning]);
+    void startThumbnailWorker(BATCH_SIZE);
+  }, []);
 
   const cancel = useCallback(() => {
-    cancelRef.current = true;
+    void cancelThumbnailWorker();
   }, []);
 
   return (

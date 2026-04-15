@@ -1,11 +1,12 @@
 pub mod commands;
 pub mod db;
+pub mod thumbnail_worker;
 
 use std::sync::Mutex;
 use tauri::Manager;
 
 use commands::{
-    DbState, ThumbnailDirState,
+    DbState, ThumbnailDirState, ThumbnailJobSender,
     cmd_upsert_photo, cmd_query_by_time_range, cmd_query_by_bounding_box,
     cmd_scan_directory, cmd_delete_photo, cmd_query_all_photos, cmd_get_photo_by_path,
     cmd_list_trips, cmd_get_trip, cmd_create_trip, cmd_delete_trip,
@@ -13,8 +14,10 @@ use commands::{
     cmd_query_photos_by_trip, cmd_query_untripped_photos, cmd_auto_group_trips,
     cmd_generate_thumbnails_batch, cmd_query_photos_needing_review,
     cmd_generate_thumbnail_for_photo, cmd_suggest_photos_for_trips,
+    cmd_start_thumbnail_worker, cmd_cancel_thumbnail_worker,
 };
 use photomap_core::db as core_db;
+use thumbnail_worker::thumbnail_worker_loop;
 
 /// Build and return the Tauri application.
 ///
@@ -45,8 +48,28 @@ pub fn run() {
             std::fs::create_dir_all(&thumbnail_dir)
                 .expect("failed to create thumbnails directory");
 
+            // ── Background thumbnail worker ────────────────────────────────────
+            // Open a *second* connection exclusively for the thumbnail worker
+            // thread.  WAL mode (set by `core_db::open`) allows this second
+            // connection to read and write concurrently with the main connection
+            // without long-term lock contention.
+            let bg_conn = core_db::open(db_path.to_str().expect("non-UTF-8 db path"))
+                .expect("failed to open background thumbnail DB connection");
+
+            let bg_thumb_dir = thumbnail_dir.clone();
+            let bg_app = app.handle().clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+
+            std::thread::Builder::new()
+                .name("thumbnail-worker".to_owned())
+                .spawn(move || {
+                    thumbnail_worker_loop(bg_conn, bg_thumb_dir, rx, bg_app);
+                })
+                .expect("failed to spawn thumbnail worker thread");
+
             app.manage(DbState(Mutex::new(conn)));
             app.manage(ThumbnailDirState(thumbnail_dir));
+            app.manage(ThumbnailJobSender(Mutex::new(tx)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -71,6 +94,8 @@ pub fn run() {
             cmd_query_photos_needing_review,
             cmd_generate_thumbnail_for_photo,
             cmd_suggest_photos_for_trips,
+            cmd_start_thumbnail_worker,
+            cmd_cancel_thumbnail_worker,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
