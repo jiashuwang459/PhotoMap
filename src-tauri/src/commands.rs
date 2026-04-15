@@ -10,10 +10,11 @@ use photomap_core::{
     confirm_trip, rename_trip, set_photo_trip,
     query_photos_by_trip, query_untripped_photos, auto_group_trips,
     suggest_photos_for_trips,
-    generate_thumbnails_batch, generate_thumbnail_for_photo, query_photos_needing_review,
+    generate_thumbnail_for_photo, query_photos_needing_review,
     BoundingBox, DbError, InsertPhoto, Page, Photo, ScanError, ScanReport, Trip,
     ThumbnailBatchReport, ThumbnailError, TripPhotoSuggestion,
 };
+use photomap_core::thumbnail::{generate_thumbnail, thumbnail_path_for, MAX_THUMB_RETRIES, ThumbnailEntryError};
 
 use crate::thumbnail_worker::ThumbnailCommand;
 
@@ -342,13 +343,135 @@ pub fn cmd_auto_group_trips(
 /// Returns a string error on a fatal database failure.  Per-photo errors are
 /// captured in [`ThumbnailBatchReport::errors`].
 #[tauri::command]
-pub fn cmd_generate_thumbnails_batch(
+pub async fn cmd_generate_thumbnails_batch(
     db_state: State<'_, DbState>,
     thumb_state: State<'_, ThumbnailDirState>,
     batch_size: u32,
 ) -> Result<ThumbnailBatchReport, ThumbnailError> {
-    let conn = db_state.0.lock().expect("db mutex poisoned");
-    generate_thumbnails_batch(&conn, &thumb_state.0, batch_size)
+    // 1) Select a batch of candidate rows while holding the DB lock,
+    // then release the lock and perform heavy image work in the blocking task.
+    struct Row {
+        id: i64,
+        file_path: String,
+        retry_count: i64,
+    }
+
+    let rows_to_process: Vec<Row> = {
+        let conn = db_state.0.lock().expect("db mutex poisoned");
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT id, file_path, thumbnail_retry_count
+                 FROM   photos
+                 WHERE  thumbnail_path IS NULL
+                   AND  thumbnail_needs_review = 0
+                   AND  thumbnail_retry_count < ?1
+                 LIMIT  ?2",
+            )
+            .map_err(DbError::from)?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![MAX_THUMB_RETRIES, batch_size], |row| {
+                Ok(Row {
+                    id: row.get(0)?,
+                    file_path: row.get(1)?,
+                    retry_count: row.get(2)?,
+                })
+            })
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+
+        drop(stmt);
+        rows
+    };
+
+    let thumb_dir = thumb_state.0.clone();
+
+    // 2) Run the image decode/resize/write work on a blocking thread.
+    let worker = tauri::async_runtime::spawn_blocking(move || {
+        let mut results: Vec<(i64, String, Result<String, String>, i64)> = Vec::with_capacity(rows_to_process.len());
+        for r in rows_to_process {
+            let file_path = r.file_path.clone();
+            let out_path = thumbnail_path_for(&thumb_dir, r.id);
+            match generate_thumbnail(std::path::Path::new(&file_path), &out_path) {
+                Ok(()) => results.push((r.id, file_path, Ok(out_path.to_string_lossy().into_owned()), r.retry_count)),
+                Err(e) => results.push((r.id, file_path, Err(e.to_string()), r.retry_count)),
+            }
+        }
+        results
+    });
+
+    let work_results = worker.await.map_err(|je| ThumbnailError::HeicDecode(format!("thumbnail worker join error: {}", je)))?;
+
+    // 3) Apply DB updates based on worker results.
+    let mut report = ThumbnailBatchReport {
+        processed: 0,
+        remaining: 0,
+        needs_review_count: 0,
+        errors: Vec::new(),
+    };
+
+    {
+        let conn = db_state.0.lock().expect("db mutex poisoned");
+
+        let mut update_success = conn
+            .prepare_cached(
+                "UPDATE photos
+                 SET    thumbnail_path = ?1, thumbnail_retry_count = 0
+                 WHERE  id = ?2",
+            )
+            .map_err(DbError::from)?;
+
+        let mut update_failure = conn
+            .prepare_cached(
+                "UPDATE photos
+                 SET    thumbnail_retry_count  = ?1,
+                        thumbnail_needs_review = ?2
+                 WHERE  id = ?3",
+            )
+            .map_err(DbError::from)?;
+
+        for (id, file_path, res, old_retry) in work_results {
+            match res {
+                Ok(path_str) => {
+                    update_success.execute(rusqlite::params![path_str, id]).map_err(DbError::from)?;
+                    report.processed += 1;
+                }
+                Err(err_msg) => {
+                    let new_count = old_retry + 1;
+                    let needs_review = i64::from(new_count >= MAX_THUMB_RETRIES);
+                    update_failure
+                        .execute(rusqlite::params![new_count, needs_review, id])
+                        .map_err(DbError::from)?;
+                    if needs_review == 1 {
+                        report.needs_review_count += 1;
+                    }
+                    report.errors.push(ThumbnailEntryError {
+                        photo_id: id,
+                        file_path,
+                        message: err_msg,
+                        retry_count: new_count,
+                        needs_review: needs_review == 1,
+                    });
+                }
+            }
+        }
+
+        // Count remaining processable photos.
+        let remaining: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM photos
+                 WHERE  thumbnail_path IS NULL
+                   AND  thumbnail_needs_review = 0
+                   AND  thumbnail_retry_count < ?1",
+                rusqlite::params![MAX_THUMB_RETRIES],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        report.remaining = remaining;
+    }
+
+    Ok(report)
 }
 
 /// Return photos that have been flagged for manual review because thumbnail

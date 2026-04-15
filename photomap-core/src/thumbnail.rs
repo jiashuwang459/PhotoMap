@@ -28,6 +28,7 @@
 //! stable primary key avoids name collisions and makes clean-up easy.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
@@ -120,6 +121,44 @@ pub struct ThumbnailBatchReport {
 /// [`ThumbnailError::Decode`] for other format errors, and
 /// [`ThumbnailError::Io`] if the output file cannot be written.
 pub fn generate_thumbnail(source: &Path, out_path: &Path) -> Result<(), ThumbnailError> {
+    println!("generate_thumbnail: start source={} out={}", source.display(), out_path.display());
+
+    // Fast-path on macOS: use the system `sips` tool to decode & scale HEIC/HEIF
+    // directly to a JPEG thumbnail. This avoids a full in-process HEIC decode
+    // of large images and is much faster and more memory-efficient.
+    let ext = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    #[cfg(target_os = "macos")]
+    if ext == "heic" || ext == "heif" {
+        use std::process::Command;
+        let out = Command::new("sips")
+            .arg("-Z")
+            .arg(format!("{}", MAX_SIDE))
+            .arg("-s")
+            .arg("format")
+            .arg("jpeg")
+            .arg("-s")
+            .arg("formatOptions")
+            .arg(format!("{}", JPEG_QUALITY))
+            .arg("--out")
+            .arg(out_path)
+            .arg(source)
+            .output()
+            .map_err(ThumbnailError::Io)?;
+
+        if out.status.success() {
+            println!("generate_thumbnail: sips fast-path succeeded for {}", source.display());
+            return Ok(());
+        } else {
+            println!("generate_thumbnail: sips failed: {}", String::from_utf8_lossy(&out.stderr));
+            // fallthrough to in-process decode
+        }
+    }
+
     let img = open_image(source)?;
     write_thumbnail(img, out_path)
 }
@@ -178,6 +217,8 @@ pub fn generate_thumbnails_batch(
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(DbError::from)?;
 
+    println!("generate_thumbnails_batch: fetched {} rows (batch_size={})", rows.len(), batch_size);
+
     // ── 2. Generate thumbnails ───────────────────────────────────────────────
     let mut report = ThumbnailBatchReport {
         processed: 0,
@@ -204,16 +245,19 @@ pub fn generate_thumbnails_batch(
         .map_err(DbError::from)?;
 
     for row in &rows {
+        println!("generate_thumbnails_batch: processing id={} path={} retry_count={}", row.id, row.file_path, row.retry_count);
         let out_path = thumbnail_path_for(thumbnail_dir, row.id);
         match generate_thumbnail(Path::new(&row.file_path), &out_path) {
             Ok(()) => {
                 let path_str = out_path.to_string_lossy().into_owned();
+                println!("generate_thumbnails_batch: success id={} out={}", row.id, out_path.display());
                 update_success
                     .execute(rusqlite::params![path_str, row.id])
                     .map_err(DbError::from)?;
                 report.processed += 1;
             }
             Err(e) => {
+                println!("generate_thumbnails_batch: error id={} err={}", row.id, e);
                 let new_count = row.retry_count + 1;
                 let needs_review = i64::from(new_count >= MAX_THUMB_RETRIES);
                 update_failure
@@ -310,10 +354,17 @@ fn open_image(source: &Path) -> Result<image::DynamicImage, ThumbnailError> {
         .unwrap_or("")
         .to_ascii_lowercase();
 
+    println!("open_image: source={} ext={}", source.display(), ext);
+
     if ext == "heic" || ext == "heif" {
         decode_heic(source)
     } else {
-        Ok(image::open(source)?)
+        let t0 = Instant::now();
+        let img = image::open(source)?;
+        let dt = t0.elapsed();
+        println!("open_image: image::open took {} ms for {}", dt.as_millis(), source.display());
+        println!("open_image: decoded with image crate source={}", source.display());
+        Ok(img)
     }
 }
 
@@ -328,7 +379,11 @@ fn open_image(source: &Path) -> Result<image::DynamicImage, ThumbnailError> {
 /// # Reference
 /// <https://docs.rs/heic/latest/heic/>
 fn decode_heic(source: &Path) -> Result<image::DynamicImage, ThumbnailError> {
+    println!("decode_heic: start source={}", source.display());
+    let t_start = Instant::now();
     let data = std::fs::read(source)?;
+    let t_read = t_start.elapsed();
+    println!("decode_heic: read {} bytes ({} ms)", data.len(), t_read.as_millis());
 
     // Probe the image dimensions so we can pre-allocate the output buffer.
     let info = heic::ImageInfo::from_bytes(&data)
@@ -340,11 +395,21 @@ fn decode_heic(source: &Path) -> Result<image::DynamicImage, ThumbnailError> {
 
     let mut buf = vec![0u8; buf_len];
 
+    let t_decode_start = Instant::now();
     let (width, height) = heic::DecoderConfig::new()
         .decode_request(&data)
         .with_output_layout(heic::PixelLayout::Rgb8)
         .decode_into(&mut buf)
         .map_err(|e| ThumbnailError::HeicDecode(e.to_string()))?;
+    let t_decode = t_decode_start.elapsed();
+    println!(
+        "decode_heic: decoded width={} height={} buffer_len={} (decode {} ms, total {} ms)",
+        width,
+        height,
+        buf.len(),
+        t_decode.as_millis(),
+        t_start.elapsed().as_millis()
+    );
 
     // Convert the raw RGB8 pixels into an image::RgbImage.
     let rgb = image::RgbImage::from_raw(width, height, buf)
@@ -356,7 +421,11 @@ fn decode_heic(source: &Path) -> Result<image::DynamicImage, ThumbnailError> {
 /// Resize `img` to fit within [`MAX_SIDE`] × [`MAX_SIDE`] and encode it as a
 /// JPEG at [`JPEG_QUALITY`] to `out_path`.
 fn write_thumbnail(img: image::DynamicImage, out_path: &Path) -> Result<(), ThumbnailError> {
-    let thumbnail = img.resize(MAX_SIDE, MAX_SIDE, FilterType::Lanczos3);
+    println!("write_thumbnail: start out={}", out_path.display());
+    let t_resize_start = Instant::now();
+    let thumbnail = img.resize(MAX_SIDE, MAX_SIDE, FilterType::Triangle);
+    let t_resize = t_resize_start.elapsed();
+    println!("write_thumbnail: resized to {}x{} ({} ms)", thumbnail.width(), thumbnail.height(), t_resize.as_millis());
 
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -366,12 +435,15 @@ fn write_thumbnail(img: image::DynamicImage, out_path: &Path) -> Result<(), Thum
     let writer = std::io::BufWriter::new(file);
     let encoder = JpegEncoder::new_with_quality(writer, JPEG_QUALITY);
     let rgb = thumbnail.to_rgb8();
+    let t_encode_start = Instant::now();
     encoder.write_image(
         rgb.as_raw(),
         rgb.width(),
         rgb.height(),
         image::ExtendedColorType::Rgb8,
     )?;
+    let t_encode = t_encode_start.elapsed();
+    println!("write_thumbnail: wrote JPEG out={} (encode {} ms)", out_path.display(), t_encode.as_millis());
     Ok(())
 }
 
