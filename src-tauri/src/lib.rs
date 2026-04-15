@@ -12,6 +12,7 @@ use commands::{
     cmd_confirm_trip, cmd_rename_trip, cmd_set_photo_trip,
     cmd_query_photos_by_trip, cmd_query_untripped_photos, cmd_auto_group_trips,
     cmd_generate_thumbnails_batch, cmd_query_photos_needing_review,
+    cmd_generate_thumbnail_for_photo, cmd_suggest_photos_for_trips,
 };
 use photomap_core::db as core_db;
 
@@ -68,6 +69,8 @@ pub fn run() {
             cmd_auto_group_trips,
             cmd_generate_thumbnails_batch,
             cmd_query_photos_needing_review,
+            cmd_generate_thumbnail_for_photo,
+            cmd_suggest_photos_for_trips,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

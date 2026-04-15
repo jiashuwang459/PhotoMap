@@ -8,9 +8,10 @@ import {
   queryUntrippedPhotos,
   renameTrip,
   setPhotoTrip,
+  suggestPhotosForTrips,
 } from "../api/photos";
 import { PhotoCard } from "./PhotoCard";
-import type { Page, Photo, Trip } from "../api/types";
+import type { Page, Photo, Trip, TripPhotoSuggestion } from "../api/types";
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
@@ -449,6 +450,11 @@ export function TripsPanel() {
   const [error, setError] = useState<string | null>(null);
   const [selectedTrip, setSelectedTrip] = useState<Trip | null>(null);
 
+  // Photo suggestions state
+  const [suggestions, setSuggestions] = useState<TripPhotoSuggestion[]>([]);
+  const [suggesting, setSuggesting] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+
   const loadPage = useCallback(async (pageOffset: number, existing: Trip[]) => {
     setLoading(true);
     setError(null);
@@ -470,23 +476,6 @@ export function TripsPanel() {
   }, [loadPage]);
 
   async function handleAutoGroup() {
-    const hasSuggested = trips.some((t) => !t.is_confirmed);
-    const hasConfirmed = trips.some((t) => t.is_confirmed);
-    if (
-      trips.length > 0 &&
-      !confirm(
-        [
-          "Re-grouping will replace ALL existing trips",
-          hasConfirmed ? "(including confirmed ones)" : "",
-          hasSuggested ? "(including suggested ones)" : "",
-          ".\nPhotos will not be removed from the library.\nContinue?",
-        ]
-          .filter(Boolean)
-          .join(" ")
-      )
-    ) {
-      return;
-    }
     setGrouping(true);
     setError(null);
     try {
@@ -499,6 +488,37 @@ export function TripsPanel() {
     } finally {
       setGrouping(false);
     }
+  }
+
+  async function handleSuggestPhotos() {
+    setSuggesting(true);
+    setError(null);
+    try {
+      const result = await suggestPhotosForTrips();
+      setSuggestions(result);
+      setShowSuggestions(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSuggesting(false);
+    }
+  }
+
+  async function handleAcceptSuggestion(tripId: number, photoIds: number[]) {
+    try {
+      await Promise.all(photoIds.map((pid) => setPhotoTrip(pid, tripId)));
+      setSuggestions((prev) => prev.filter((s) => s.trip_id !== tripId));
+      // Refresh trip list so photo counts update.
+      setTrips([]);
+      setOffset(0);
+      await loadPage(0, []);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  function handleDismissSuggestion(tripId: number) {
+    setSuggestions((prev) => prev.filter((s) => s.trip_id !== tripId));
   }
 
   function handleTripDeleted() {
@@ -536,22 +556,92 @@ export function TripsPanel() {
           <h2>Trips</h2>
           <p className="trips-hint">
             Photos are grouped into trips based on time gaps between shots.
-            Suggested trips are auto-generated; accept or dismiss each one.
+            Confirmed trips are preserved when re-grouping; only new suggestions
+            are added.
           </p>
         </div>
-        <button
-          className="btn-primary"
-          onClick={handleAutoGroup}
-          disabled={grouping || loading}
-        >
-          {grouping ? "Grouping…" : "Auto-group trips"}
-        </button>
+        <div className="trips-toolbar-actions">
+          <button
+            className="btn-primary"
+            onClick={handleAutoGroup}
+            disabled={grouping || loading}
+          >
+            {grouping ? "Grouping…" : "Auto-group trips"}
+          </button>
+          <button
+            className="btn-outline"
+            onClick={showSuggestions ? () => setShowSuggestions(false) : handleSuggestPhotos}
+            disabled={suggesting || loading || confirmed.length === 0}
+            title={confirmed.length === 0 ? "Accept some trips first to enable suggestions" : ""}
+          >
+            {suggesting ? "Finding…" : showSuggestions ? "Hide suggestions" : "Suggest photos"}
+          </button>
+        </div>
       </div>
 
       {error && (
         <p className="trips-error" role="alert">
           {error}
         </p>
+      )}
+
+      {/* ── Photo suggestions panel ── */}
+      {showSuggestions && (
+        <section className="trips-suggestions">
+          <h3 className="trips-section-title">
+            Photo suggestions
+            {suggestions.length > 0 && (
+              <span className="trips-section-count">{suggestions.length}</span>
+            )}
+          </h3>
+          {suggestions.length === 0 ? (
+            <p className="trips-hint">
+              No unassigned photos found that fall within existing confirmed trip
+              time windows.
+            </p>
+          ) : (
+            suggestions.map((s) => (
+              <div key={s.trip_id} className="trip-suggestion-card">
+                <div className="trip-suggestion-header">
+                  <span className="trip-suggestion-name">{s.trip_name}</span>
+                  <span className="trip-suggestion-count">
+                    {s.photos.length} unassigned photo
+                    {s.photos.length !== 1 ? "s" : ""} in this time window
+                  </span>
+                </div>
+                <div className="trip-suggestion-thumbs">
+                  {s.photos.slice(0, 6).map((p) => (
+                    <PhotoCard key={p.id} photo={p} />
+                  ))}
+                  {s.photos.length > 6 && (
+                    <span className="trip-suggestion-more">
+                      +{s.photos.length - 6} more
+                    </span>
+                  )}
+                </div>
+                <div className="trip-suggestion-actions">
+                  <button
+                    className="btn-primary"
+                    onClick={() =>
+                      handleAcceptSuggestion(
+                        s.trip_id,
+                        s.photos.map((p) => p.id)
+                      )
+                    }
+                  >
+                    Add all to "{s.trip_name}"
+                  </button>
+                  <button
+                    className="btn-ghost"
+                    onClick={() => handleDismissSuggestion(s.trip_id)}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </section>
       )}
 
       {!loading && trips.length === 0 && !error && (

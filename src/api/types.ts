@@ -124,3 +124,13 @@ export interface ScanReport {
   /** Per-file errors that did not abort the scan. */
   errors: ScanEntryError[];
 }
+
+/** A suggestion to add untripped photos to an existing confirmed trip. */
+export interface TripPhotoSuggestion {
+  /** ID of the confirmed trip. */
+  trip_id: number;
+  /** Name of the trip. */
+  trip_name: string;
+  /** Photos that are unassigned but fall within the trip's time window. */
+  photos: Photo[];
+}

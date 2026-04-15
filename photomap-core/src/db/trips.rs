@@ -3,14 +3,17 @@
 //! A **trip** is a named, time-bounded cluster of photos.  The core algorithm
 //! (`auto_group_trips`) works as follows:
 //!
-//! 1. Fetch all photos that have a timestamp, ordered by timestamp ascending.
+//! 1. Fetch photos that are not yet assigned to any confirmed trip, ordered by
+//!    timestamp ascending.
 //! 2. Split the sequence wherever the gap between two consecutive photos exceeds
 //!    a caller-supplied threshold (default: 6 hours = 21 600 seconds).
 //! 3. Each segment becomes one trip.  The trip name is derived from the date of
 //!    its first photo (e.g. `"Trip 2024-06-01"`).  If multiple trips start on
 //!    the same date a numeric suffix is appended (`"Trip 2024-06-01 (2)"`).
-//! 4. Any existing trips and `trip_id` assignments are cleared before the new
-//!    trips are written, making the operation fully idempotent.
+//! 4. Only **unconfirmed** (suggested) trips are cleared before the new trips
+//!    are written; confirmed trips and their photo assignments are preserved.
+//!    Clusters whose time range overlaps an existing confirmed trip are skipped
+//!    to avoid duplicate suggestions.
 //!
 //! All functions accept a `&rusqlite::Connection` and never open their own
 //! connection, matching the convention used throughout `photomap-core`.
@@ -45,6 +48,21 @@ pub struct Trip {
     /// Auto-grouped trips start with `is_confirmed = false` (i.e. "suggested");
     /// the user confirms them via [`confirm_trip`].
     pub is_confirmed: bool,
+}
+
+/// Suggested photos to add to an existing trip.
+///
+/// Returned by [`suggest_photos_for_trips`]: each entry groups untripped
+/// photos whose timestamps fall within a confirmed trip's time window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TripPhotoSuggestion {
+    /// The confirmed trip this suggestion refers to.
+    pub trip_id: i64,
+    /// Human-readable name of the trip.
+    pub trip_name: String,
+    /// Photos that are unassigned but whose timestamps fall within the trip's
+    /// `[start_ts, end_ts]` window.
+    pub photos: Vec<Photo>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -241,6 +259,11 @@ pub const DEFAULT_GAP_SECONDS: i64 = 6 * 3600;
 ///
 /// Photos without a `timestamp` are left ungrouped (`trip_id = NULL`).
 ///
+/// **Confirmed trips are never touched.**  Only unconfirmed (suggested) trips
+/// and their photo assignments are cleared before the new suggestions are
+/// written.  Clusters whose time range overlaps an existing confirmed trip's
+/// window are skipped to avoid creating duplicate suggestions.
+///
 /// Returns the list of newly created trip IDs.
 ///
 /// # Errors
@@ -249,20 +272,42 @@ pub fn auto_group_trips(
     conn: &Connection,
     gap_seconds: i64,
 ) -> Result<Vec<i64>, DbError> {
-    // ── 1. Clear existing trips ──────────────────────────────────────────────
+    // ── 1. Load confirmed trip ranges (preserve these) ────────────────────────
+    struct ConfirmedRange {
+        start_ts: i64,
+        end_ts: i64,
+    }
+    let mut confirmed_stmt = conn.prepare_cached(
+        "SELECT start_ts, end_ts FROM trips WHERE is_confirmed = 1
+         AND start_ts IS NOT NULL AND end_ts IS NOT NULL",
+    )?;
+    let confirmed_ranges: Vec<ConfirmedRange> = confirmed_stmt
+        .query_map([], |row| {
+            Ok(ConfirmedRange {
+                start_ts: row.get(0)?,
+                end_ts: row.get(1)?,
+            })
+        })?
+        .collect::<SqlResult<Vec<_>>>()?;
+
+    // ── 2. Clear only unconfirmed (suggested) trips ───────────────────────────
     conn.execute_batch(
-        "UPDATE photos SET trip_id = NULL;
-         DELETE FROM trips;",
+        "UPDATE photos SET trip_id = NULL
+         WHERE trip_id IN (SELECT id FROM trips WHERE is_confirmed = 0);
+         DELETE FROM trips WHERE is_confirmed = 0;",
     )?;
 
-    // ── 2. Load timestamped photos ordered by timestamp ───────────────────
+    // ── 3. Load photos not already in a confirmed trip ────────────────────────
     struct Row {
         id: i64,
         timestamp: i64,
     }
 
     let mut stmt = conn.prepare_cached(
-        "SELECT id, timestamp FROM photos WHERE timestamp IS NOT NULL ORDER BY timestamp ASC",
+        "SELECT id, timestamp FROM photos
+         WHERE  timestamp IS NOT NULL
+           AND  trip_id IS NULL
+         ORDER BY timestamp ASC",
     )?;
     let photo_rows: Vec<Row> = stmt
         .query_map([], |row| {
@@ -277,8 +322,7 @@ pub fn auto_group_trips(
         return Ok(vec![]);
     }
 
-    // ── 3. Split into clusters ─────────────────────────────────────────────
-    // Each cluster is (start_ts, end_ts, Vec<photo_id>).
+    // ── 4. Split into clusters ────────────────────────────────────────────────
     let mut clusters: Vec<(i64, i64, Vec<i64>)> = Vec::new();
     let mut current_start = photo_rows[0].timestamp;
     let mut current_end = photo_rows[0].timestamp;
@@ -294,7 +338,7 @@ pub fn auto_group_trips(
     }
     clusters.push((current_start, current_end, current_ids));
 
-    // ── 4. Persist trips and assign photo IDs ─────────────────────────────
+    // ── 5. Persist trips, skipping those that overlap a confirmed trip ─────────
     let mut name_counts: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
     let mut trip_ids: Vec<i64> = Vec::with_capacity(clusters.len());
@@ -305,6 +349,14 @@ pub fn auto_group_trips(
     )?;
 
     for (start_ts, end_ts, photo_ids) in clusters {
+        // Skip clusters that overlap any confirmed trip to avoid duplicates.
+        let overlaps_confirmed = confirmed_ranges.iter().any(|r| {
+            ranges_overlap(start_ts, end_ts, r.start_ts, r.end_ts)
+        });
+        if overlaps_confirmed {
+            continue;
+        }
+
         // Derive the trip name from the start date (UTC).
         let date_str = ts_to_date_str(start_ts);
         let count = name_counts.entry(date_str.clone()).or_insert(0);
@@ -321,8 +373,7 @@ pub fn auto_group_trips(
         )?;
         trip_ids.push(trip_id);
 
-        // Batch-update photos using a temporary VALUES list.  rusqlite does not
-        // support array parameters, so we build a parameterised IN clause.
+        // Batch-update photos using a parameterised IN clause.
         let placeholders = (1..=photo_ids.len())
             .map(|i| format!("?{}", i + 1))
             .collect::<Vec<_>>()
@@ -343,9 +394,100 @@ pub fn auto_group_trips(
     Ok(trip_ids)
 }
 
+/// Find untripped photos whose timestamps fall within confirmed trip windows
+/// and return them as suggestions grouped by trip.
+///
+/// Only confirmed trips with non-null `start_ts` and `end_ts` are considered.
+/// Photos that already belong to any trip are excluded.
+///
+/// # Errors
+/// Returns a [`DbError`] on any SQLite failure.
+pub fn suggest_photos_for_trips(
+    conn: &Connection,
+) -> Result<Vec<TripPhotoSuggestion>, DbError> {
+    // Load confirmed trips that have defined time ranges.
+    struct TripMeta {
+        id: i64,
+        name: String,
+        start_ts: i64,
+        end_ts: i64,
+    }
+    let mut trip_stmt = conn.prepare_cached(
+        "SELECT id, name, start_ts, end_ts FROM trips
+         WHERE  is_confirmed = 1
+           AND  start_ts IS NOT NULL
+           AND  end_ts   IS NOT NULL
+         ORDER BY start_ts ASC",
+    )?;
+    let trip_metas: Vec<TripMeta> = trip_stmt
+        .query_map([], |row| {
+            Ok(TripMeta {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                start_ts: row.get(2)?,
+                end_ts: row.get(3)?,
+            })
+        })?
+        .collect::<SqlResult<Vec<_>>>()?;
+
+    if trip_metas.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // For each confirmed trip, find untripped photos in its time window.
+    let mut suggestions: Vec<TripPhotoSuggestion> = Vec::new();
+
+    let mut photo_stmt = conn.prepare_cached(
+        "SELECT id, file_path, timestamp, latitude, longitude,
+                thumbnail_path, blur_score, trip_id, file_hash,
+                thumbnail_retry_count, thumbnail_needs_review
+         FROM   photos
+         WHERE  trip_id   IS NULL
+           AND  timestamp >= ?1
+           AND  timestamp <= ?2
+         ORDER BY timestamp ASC",
+    )?;
+
+    for tm in &trip_metas {
+        let photos: Vec<crate::db::photos::Photo> = photo_stmt
+            .query_map(rusqlite::params![tm.start_ts, tm.end_ts], |row| {
+                Ok(crate::db::photos::Photo {
+                    id: row.get(0)?,
+                    file_path: row.get(1)?,
+                    timestamp: row.get(2)?,
+                    latitude: row.get(3)?,
+                    longitude: row.get(4)?,
+                    thumbnail_path: row.get(5)?,
+                    blur_score: row.get(6)?,
+                    trip_id: row.get(7)?,
+                    file_hash: row.get(8)?,
+                    thumbnail_retry_count: row.get(9)?,
+                    thumbnail_needs_review: row.get::<_, i64>(10)? != 0,
+                })
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+
+        if !photos.is_empty() {
+            suggestions.push(TripPhotoSuggestion {
+                trip_id: tm.id,
+                trip_name: tm.name.clone(),
+                photos,
+            });
+        }
+    }
+
+    Ok(suggestions)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Returns `true` when the time ranges `[a_start, a_end]` and `[b_start, b_end]`
+/// share at least one point (inclusive on both ends).
+fn ranges_overlap(a_start: i64, a_end: i64, b_start: i64, b_end: i64) -> bool {
+    a_start <= b_end && b_start <= a_end
+}
 
 fn map_trip_row(row: &rusqlite::Row<'_>) -> SqlResult<Trip> {
     Ok(Trip {

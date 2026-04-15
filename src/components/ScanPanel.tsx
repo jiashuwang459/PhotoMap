@@ -1,20 +1,14 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { scanDirectory, generateThumbnailsBatch } from "../api/photos";
-import type { ScanReport, ThumbnailBatchReport } from "../api/types";
+import { scanDirectory } from "../api/photos";
+import type { ScanReport } from "../api/types";
 import { homeDir } from '@tauri-apps/api/path';
+import { useThumbnailWorker } from "../context/ThumbnailWorkerContext";
 
 /** Tauri extends the standard File with a native `path` property. */
 interface TauriFile extends File {
   path?: string;
 }
-
-/** Number of thumbnails to generate per backend call. Kept small to avoid
- *  blocking the UI thread for a long stretch on each batch. */
-const THUMB_BATCH_SIZE = 5;
-
-/** Milliseconds to yield to the UI between thumbnail batches. */
-const THUMB_BATCH_DELAY_MS = 200;
 
 // ── Recent directories (persisted to localStorage) ────────────────────────────
 
@@ -53,14 +47,10 @@ export function ScanPanel() {
   /** Recently scanned directories loaded from localStorage on mount. */
   const [recentDirs, setRecentDirs] = useState<string[]>(() => loadRecentDirs());
 
-  // Thumbnail generation state
-  const [thumbRunning, setThumbRunning] = useState(false);
-  const [thumbReport, setThumbReport] = useState<ThumbnailBatchReport | null>(null);
-  const [thumbError, setThumbError] = useState<string | null>(null);
-  const [thumbTotal, setThumbTotal] = useState(0);
-  const [thumbDone, setThumbDone] = useState(0);
-  /** Short status message shown during thumbnail generation. */
-  const [thumbStatus, setThumbStatus] = useState("");
+  // Thumbnail generation is handled by the global background worker.
+  const { isRunning: thumbRunning, done: thumbDone, total: thumbTotal, status: thumbStatus, start: startThumbnails, cancel: cancelThumbnails } = useThumbnailWorker();
+
+  const thumbPercent = thumbTotal > 0 ? Math.round((thumbDone / thumbTotal) * 100) : 0;
 
   async function handleScan(path?: string) {
     const trimmed = (path ?? dir).trim();
@@ -88,39 +78,6 @@ export function ScanPanel() {
       }
     } catch (e) {
       setError(String(e));
-    }
-  }
-
-  async function handleGenerateThumbnails() {
-    setThumbRunning(true);
-    setThumbReport(null);
-    setThumbError(null);
-    setThumbTotal(0);
-    setThumbDone(0);
-    setThumbStatus("Starting…");
-
-    try {
-      // First call gives us the initial "remaining" to show overall progress.
-      let lastReport = await generateThumbnailsBatch(THUMB_BATCH_SIZE);
-      const initial = lastReport.processed + lastReport.remaining;
-      setThumbTotal(initial);
-      setThumbDone(lastReport.processed);
-
-      // Keep batching until nothing is left, yielding between each batch so
-      // the UI stays responsive and CPU spikes are smoothed out.
-      while (lastReport.remaining > 0) {
-        setThumbStatus(`Processing… (${lastReport.remaining} remaining)`);
-        await new Promise<void>((resolve) => setTimeout(resolve, THUMB_BATCH_DELAY_MS));
-        lastReport = await generateThumbnailsBatch(THUMB_BATCH_SIZE);
-        setThumbDone((prev) => prev + lastReport.processed);
-      }
-      setThumbReport(lastReport);
-      setThumbStatus("");
-    } catch (e) {
-      setThumbError(String(e));
-      setThumbStatus("");
-    } finally {
-      setThumbRunning(false);
     }
   }
 
@@ -153,9 +110,6 @@ export function ScanPanel() {
       void handleScan(first.name || "");
     }
   }
-
-  const thumbPercent =
-    thumbTotal > 0 ? Math.round((thumbDone / thumbTotal) * 100) : 0;
 
   return (
     <div
@@ -265,17 +219,27 @@ export function ScanPanel() {
         <h2>Generate thumbnails</h2>
         <p className="scan-hint">
           Generate JPEG previews for all indexed photos that don't have one yet.
-          Thumbnails are stored in the application data folder and displayed in
-          the Library, Map, and Trips views.
+          Thumbnails continue generating in the background even when you switch
+          tabs — use the progress bar in the header to monitor or cancel.
         </p>
 
-        <button
-          className="scan-button"
-          onClick={handleGenerateThumbnails}
-          disabled={thumbRunning}
-        >
-          {thumbRunning ? "Generating…" : "Generate thumbnails"}
-        </button>
+        <div className="scan-input-row">
+          <button
+            className="scan-button"
+            onClick={startThumbnails}
+            disabled={thumbRunning}
+          >
+            {thumbRunning ? "Generating…" : "Generate thumbnails"}
+          </button>
+          {thumbRunning && (
+            <button
+              className="scan-choose-button"
+              onClick={cancelThumbnails}
+            >
+              Cancel
+            </button>
+          )}
+        </div>
 
         {thumbRunning && (
           <div className="thumb-progress">
@@ -291,63 +255,12 @@ export function ScanPanel() {
           </div>
         )}
 
-        {thumbError && (
-          <div className="scan-error" role="alert">
-            <strong>Error:</strong> {thumbError}
-          </div>
-        )}
-
-        {!thumbRunning && thumbReport && (
+        {!thumbRunning && thumbDone > 0 && (
           <div className="scan-report">
             <h3>Done</h3>
             <div className="report-grid">
-              <ReportStat
-                label="Generated"
-                value={thumbDone}
-                colour="green"
-              />
-              <ReportStat
-                label="Errors"
-                value={thumbReport.errors.length}
-                colour={thumbReport.errors.length > 0 ? "red" : "gray"}
-              />
-              {thumbReport.needs_review_count > 0 && (
-                <ReportStat
-                  label="Needs review"
-                  value={thumbReport.needs_review_count}
-                  colour="orange"
-                />
-              )}
+              <ReportStat label="Generated" value={thumbDone} colour="green" />
             </div>
-            {thumbReport.needs_review_count > 0 && (
-              <p className="scan-hint">
-                ⚠️ {thumbReport.needs_review_count} photo
-                {thumbReport.needs_review_count !== 1 ? "s" : ""} failed too
-                many times and have been flagged for review. Check the Library
-                tab for photos marked with ⚠️.
-              </p>
-            )}
-            {thumbReport.errors.length > 0 && (
-              <details className="scan-errors-details">
-                <summary>
-                  {thumbReport.errors.length} file
-                  {thumbReport.errors.length !== 1 ? "s" : ""} failed
-                </summary>
-                <ul className="scan-errors-list">
-                  {thumbReport.errors.map((err, i) => (
-                    <li key={i}>
-                      <code>{err.file_path}</code>
-                      <span className="scan-error-msg">
-                        {err.message}
-                        {err.needs_review && (
-                          <span className="scan-needs-review-badge"> ⚠️ flagged for review</span>
-                        )}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            )}
           </div>
         )}
       </div>

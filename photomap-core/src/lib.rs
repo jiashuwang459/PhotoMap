@@ -12,10 +12,12 @@ pub use db::{
     create_trip, list_trips, get_trip, delete_trip,
     confirm_trip, rename_trip, set_photo_trip,
     query_photos_by_trip, query_untripped_photos, auto_group_trips,
-    Trip,
+    suggest_photos_for_trips,
+    Trip, TripPhotoSuggestion,
 };
 pub use scanner::{scan_directory, compute_sha256, ScanError, ScanReport, ScanEntryError};
 pub use thumbnail::{
-    generate_thumbnail, generate_thumbnails_batch, thumbnail_path_for,
+    generate_thumbnail, generate_thumbnails_batch, generate_thumbnail_for_photo,
+    thumbnail_path_for,
     ThumbnailBatchReport, ThumbnailEntryError, ThumbnailError, MAX_THUMB_RETRIES,
 };

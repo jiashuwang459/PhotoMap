@@ -225,3 +225,26 @@ export async function generateThumbnailsBatch(
 export async function queryPhotosNeedingReview(page: Page): Promise<Photo[]> {
   return invoke<Photo[]>("cmd_query_photos_needing_review", { page });
 }
+
+/**
+ * Generate (or re-generate) a thumbnail for a single photo, ignoring retry
+ * limits.  Intended for use from the photo viewer when the user clicks
+ * "Generate thumbnail".
+ *
+ * @param photoId The database id of the photo to process.
+ * @returns The absolute path of the newly written thumbnail file.
+ */
+export async function generateThumbnailForPhoto(photoId: number): Promise<string> {
+  return invoke<string>("cmd_generate_thumbnail_for_photo", { photoId });
+}
+
+/**
+ * Find untripped photos whose timestamps fall within confirmed trip windows
+ * and return them as per-trip suggestions.
+ *
+ * @returns A list of {@link TripPhotoSuggestion} entries, one per qualifying
+ *          confirmed trip.
+ */
+export async function suggestPhotosForTrips(): Promise<import("./types").TripPhotoSuggestion[]> {
+  return invoke<import("./types").TripPhotoSuggestion[]>("cmd_suggest_photos_for_trips");
+}

@@ -9,9 +9,10 @@ use photomap_core::{
     create_trip, list_trips, get_trip, delete_trip,
     confirm_trip, rename_trip, set_photo_trip,
     query_photos_by_trip, query_untripped_photos, auto_group_trips,
-    generate_thumbnails_batch, query_photos_needing_review,
+    suggest_photos_for_trips,
+    generate_thumbnails_batch, generate_thumbnail_for_photo, query_photos_needing_review,
     BoundingBox, DbError, InsertPhoto, Page, Photo, ScanError, ScanReport, Trip,
-    ThumbnailBatchReport, ThumbnailError,
+    ThumbnailBatchReport, ThumbnailError, TripPhotoSuggestion,
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -356,4 +357,42 @@ pub fn cmd_query_photos_needing_review(
 ) -> Result<Vec<Photo>, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
     query_photos_needing_review(&conn, &page)
+}
+
+/// Generate (or re-generate) a thumbnail for a single photo identified by
+/// `photo_id`, ignoring any retry limits or review flags.
+///
+/// This command is intended for manual invocation from the photo viewer UI,
+/// allowing the user to retry a previously failed photo or generate a thumbnail
+/// on demand.
+///
+/// Returns the absolute path of the newly written thumbnail file.
+///
+/// # Errors
+/// Returns a string error if the photo does not exist or thumbnail generation
+/// fails.
+#[tauri::command]
+pub fn cmd_generate_thumbnail_for_photo(
+    db_state: State<'_, DbState>,
+    thumb_state: State<'_, ThumbnailDirState>,
+    photo_id: i64,
+) -> Result<String, ThumbnailError> {
+    let conn = db_state.0.lock().expect("db mutex poisoned");
+    generate_thumbnail_for_photo(&conn, &thumb_state.0, photo_id)
+}
+
+/// Find untripped photos whose timestamps fall within confirmed trip windows.
+///
+/// Returns one [`TripPhotoSuggestion`] per confirmed trip that has at least
+/// one eligible photo.  The caller can then decide to add the suggested photos
+/// to the trip via [`cmd_set_photo_trip`].
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_suggest_photos_for_trips(
+    state: State<'_, DbState>,
+) -> Result<Vec<TripPhotoSuggestion>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    suggest_photos_for_trips(&conn)
 }

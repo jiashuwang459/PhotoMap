@@ -3,11 +3,42 @@ import { PhotoGrid } from "./components/PhotoGrid";
 import { ScanPanel } from "./components/ScanPanel";
 import { MapView } from "./components/MapView";
 import { TripsPanel } from "./components/TripsPanel";
+import { ThumbnailWorkerProvider, useThumbnailWorker } from "./context/ThumbnailWorkerContext";
 import "./App.css";
 
 type Tab = "library" | "map" | "trips" | "scan";
 
-function App() {
+// ── Thumbnail progress mini-bar shown in the nav when worker is active ────────
+
+function ThumbnailProgressBadge() {
+  const { isRunning, done, total, status, cancel } = useThumbnailWorker();
+  if (!isRunning) return null;
+
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+  return (
+    <div className="thumb-badge" role="status">
+      <div className="thumb-badge-bar">
+        <div className="thumb-badge-fill" style={{ width: `${pct}%` }} />
+      </div>
+      <span className="thumb-badge-label">
+        {total > 0 ? `Thumbnails ${pct}%` : status}
+      </span>
+      <button
+        className="thumb-badge-cancel"
+        onClick={cancel}
+        title="Cancel thumbnail generation"
+        aria-label="Cancel thumbnail generation"
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
+// ── Main app ──────────────────────────────────────────────────────────────────
+
+function AppShell() {
   const [tab, setTab] = useState<Tab>("library");
 
   return (
@@ -41,15 +72,37 @@ function App() {
             Scan
           </button>
         </nav>
+        <ThumbnailProgressBadge />
       </header>
 
+      {/*
+        Keep ALL tab panels mounted at all times so that background thumbnail
+        generation continues even while the user browses other tabs.
+        Each panel is hidden via CSS when its tab is not active.
+      */}
       <main className={`app-content${tab === "map" ? " app-content--map" : ""}`}>
-        {tab === "library" && <PhotoGrid />}
-        {tab === "map" && <MapView />}
-        {tab === "trips" && <TripsPanel />}
-        {tab === "scan" && <ScanPanel />}
+        <div className={tab === "library" ? "" : "tab-hidden"}>
+          <PhotoGrid />
+        </div>
+        <div className={tab === "map" ? "tab-map-active" : "tab-hidden"}>
+          <MapView />
+        </div>
+        <div className={tab === "trips" ? "" : "tab-hidden"}>
+          <TripsPanel />
+        </div>
+        <div className={tab === "scan" ? "" : "tab-hidden"}>
+          <ScanPanel />
+        </div>
       </main>
     </div>
+  );
+}
+
+function App() {
+  return (
+    <ThumbnailWorkerProvider>
+      <AppShell />
+    </ThumbnailWorkerProvider>
   );
 }
 

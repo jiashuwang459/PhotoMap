@@ -24,13 +24,27 @@ function basename(path: string): string {
 
 interface PhotoCardProps {
   photo: Photo;
+  onClick?: (photo: Photo) => void;
 }
 
-export function PhotoCard({ photo }: PhotoCardProps) {
+export function PhotoCard({ photo, onClick }: PhotoCardProps) {
   const gps = formatGps(photo.latitude, photo.longitude);
 
   return (
-    <div className="photo-card" title={photo.file_path}>
+    <div
+      className={`photo-card${onClick ? " photo-card--clickable" : ""}`}
+      title={photo.file_path}
+      onClick={onClick ? () => onClick(photo) : undefined}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={
+        onClick
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") onClick(photo);
+            }
+          : undefined
+      }
+    >
       <div className="photo-card-thumb" aria-hidden="true">
         {photo.thumbnail_path ? (
           <img
@@ -40,7 +54,9 @@ export function PhotoCard({ photo }: PhotoCardProps) {
             loading="lazy"
           />
         ) : (
-          <span className="photo-card-thumb-icon">🖼</span>
+          <span className="photo-card-thumb-icon">
+            {photo.thumbnail_needs_review ? "⚠️" : "🖼"}
+          </span>
         )}
       </div>
       <div className="photo-card-body">

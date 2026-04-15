@@ -249,6 +249,49 @@ pub fn generate_thumbnails_batch(
     Ok(report)
 }
 
+/// Generate a thumbnail for a single photo identified by `photo_id`.
+///
+/// Unlike [`generate_thumbnails_batch`] this function ignores `thumbnail_retry_count`
+/// and `thumbnail_needs_review` flags, allowing the user to manually trigger
+/// (or retry) thumbnail generation for a specific photo from the photo viewer.
+///
+/// On success, `photos.thumbnail_path` is updated and `thumbnail_retry_count` /
+/// `thumbnail_needs_review` are reset.
+///
+/// # Errors
+/// Returns [`ThumbnailError::Database`] if the photo record cannot be found
+/// or a DB write fails.  Returns a decode or I/O error if the image itself
+/// cannot be processed.
+pub fn generate_thumbnail_for_photo(
+    conn: &Connection,
+    thumbnail_dir: &Path,
+    photo_id: i64,
+) -> Result<String, ThumbnailError> {
+    let file_path: String = conn
+        .query_row(
+            "SELECT file_path FROM photos WHERE id = ?1",
+            rusqlite::params![photo_id],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+
+    let out_path = thumbnail_path_for(thumbnail_dir, photo_id);
+    generate_thumbnail(Path::new(&file_path), &out_path)?;
+
+    let path_str = out_path.to_string_lossy().into_owned();
+    conn.execute(
+        "UPDATE photos
+         SET    thumbnail_path        = ?1,
+                thumbnail_retry_count = 0,
+                thumbnail_needs_review = 0
+         WHERE  id = ?2",
+        rusqlite::params![path_str, photo_id],
+    )
+    .map_err(DbError::from)?;
+
+    Ok(path_str)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────

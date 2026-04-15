@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { queryAllPhotos, queryByTimeRange } from "../api/photos";
 import type { Page, Photo } from "../api/types";
 import { PhotoCard } from "./PhotoCard";
+import { PhotoViewer } from "./PhotoViewer";
 import type { FilterState } from "./FilterBar";
 import { FilterBar } from "./FilterBar";
 
@@ -19,6 +20,7 @@ export function PhotoGrid() {
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedPhoto, setSelectedPhoto] = useState<Photo | null>(null);
 
   const [filter, setFilter] = useState<FilterState>({
     mode: "all",
@@ -69,6 +71,12 @@ export function PhotoGrid() {
     void fetchPage(offset, false);
   }
 
+  /** When a thumbnail is generated from the viewer, update the cached photo. */
+  function handleThumbnailGenerated(updated: Photo) {
+    setPhotos((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+    setSelectedPhoto(updated);
+  }
+
   return (
     <div className="photo-grid-container">
       <FilterBar filter={filter} onChange={setFilter} onApply={handleApply} />
@@ -90,7 +98,7 @@ export function PhotoGrid() {
 
       <div className="photo-grid">
         {photos.map((p) => (
-          <PhotoCard key={p.id} photo={p} />
+          <PhotoCard key={p.id} photo={p} onClick={setSelectedPhoto} />
         ))}
       </div>
 
@@ -100,6 +108,14 @@ export function PhotoGrid() {
         <button className="load-more-button" onClick={handleLoadMore}>
           Load more
         </button>
+      )}
+
+      {selectedPhoto && (
+        <PhotoViewer
+          photo={selectedPhoto}
+          onClose={() => setSelectedPhoto(null)}
+          onThumbnailGenerated={handleThumbnailGenerated}
+        />
       )}
     </div>
   );
