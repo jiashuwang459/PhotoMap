@@ -85,7 +85,7 @@ function AppShell() {
           <PhotoGrid />
         </div>
         <div className={tab === "map" ? "tab-map-active" : "tab-hidden"}>
-          <MapView />
+          <MapView isActive={tab === "map"} />
         </div>
         <div className={tab === "trips" ? "" : "tab-hidden"}>
           <TripsPanel />

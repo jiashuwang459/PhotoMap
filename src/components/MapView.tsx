@@ -223,12 +223,26 @@ function ClusterPopup({ cluster }: { cluster: PhotoCluster }) {
 
 // ── MapView ───────────────────────────────────────────────────────────────────
 
-export function MapView() {
+interface MapViewProps {
+  /** True when this tab panel is the currently visible tab. */
+  isActive: boolean;
+}
+
+export function MapView({ isActive }: MapViewProps) {
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mapRef = useRef<LeafletMap | null>(null);
+
+  // Leaflet measures the container on init; if the panel is hidden (display:none)
+  // at that point the map size is 0×0 and tiles never load.  Call invalidateSize()
+  // whenever the tab becomes active so Leaflet recalculates and renders correctly.
+  useEffect(() => {
+    if (isActive) {
+      mapRef.current?.invalidateSize();
+    }
+  }, [isActive]);
 
   const handleViewportChange = useCallback(
     async (bounds: LatLngBounds, newZoom: number) => {
