@@ -1,11 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import L from "leaflet";
-import { MapContainer, TileLayer, Marker, useMapEvents } from "react-leaflet";
+import {
+  MapContainer,
+  TileLayer,
+  Marker,
+  Polygon,
+  Tooltip,
+  useMap,
+  useMapEvents,
+} from "react-leaflet";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { Map as LeafletMap, LatLngBounds } from "leaflet";
-import { queryByBoundingBox } from "../api/photos";
-import type { BoundingBox, Page, Photo } from "../api/types";
+import {
+  generateThumbnailForPhoto,
+  listTrips,
+  queryByBoundingBox,
+  queryPhotosByTrip,
+} from "../api/photos";
+import type { BoundingBox, Page, Photo, Trip } from "../api/types";
 
 // ── constants ────────────────────────────────────────────────────────────────
 
@@ -28,6 +41,19 @@ const ARROW_H = 10;
  */
 const COLLISION_PAD = 6;
 
+/**
+ * Zoom level at which TripMapView switches from trip-centroid markers to
+ * individual photo markers.
+ */
+const TRIP_DETAIL_ZOOM = 10;
+
+/** Rotating colour palette for trip overlays. */
+const TRIP_COLORS = [
+  "#e74c3c", "#3498db", "#2ecc71", "#f39c12", "#9b59b6",
+  "#1abc9c", "#e67e22", "#34495e", "#e91e63", "#00bcd4",
+  "#ff5722", "#607d8b", "#8bc34a", "#ff9800", "#673ab7",
+];
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function fmtDate(ts: number | null): string {
@@ -43,37 +69,58 @@ function basename(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+/** Photos mode or trips mode. */
+type MapMode = "photos" | "trips";
+
+/** Axis-aligned bounding box for a trip's geotagged photos. */
+interface TripBounds {
+  minLat: number;
+  maxLat: number;
+  minLon: number;
+  maxLon: number;
+  centLat: number;
+  centLon: number;
+}
+
+/** Loaded trip with its geotagged photos and computed spatial data. */
+interface TripData {
+  trip: Trip;
+  /** Only photos that have both lat and lon. */
+  photos: Photo[];
+  bounds: TripBounds;
+  /** Convex-hull polygon positions in [lat, lon] order for Leaflet. */
+  hull: [number, number][];
+  /** CSS colour string from TRIP_COLORS palette. */
+  color: string;
+}
+
 // ── Clustering ───────────────────────────────────────────────────────────────
 
 /** A group of spatially-nearby photos rendered as a single map marker. */
 interface PhotoCluster {
-  /** Stable key derived from the clustering grid cell. */
   key: string;
-  /** Average latitude of all photos in the cluster. */
   lat: number;
-  /** Average longitude of all photos in the cluster. */
   lon: number;
   photos: Photo[];
 }
 
 /**
  * Returns the grid-cell width in degrees for the given Leaflet zoom level.
- * Larger values = coarser clustering at low zoom; finer at high zoom.
+ * Finer cells at high zoom → less aggressive clustering.
  */
 function zoomToCellDeg(zoom: number): number {
-  if (zoom >= 15) return 0.005;
-  if (zoom >= 13) return 0.02;
-  if (zoom >= 11) return 0.08;
-  if (zoom >= 8) return 0.5;
-  if (zoom >= 5) return 3;
-  return 15;
+  if (zoom >= 18) return 0.0002;
+  if (zoom >= 16) return 0.001;
+  if (zoom >= 14) return 0.004;
+  if (zoom >= 12) return 0.015;
+  if (zoom >= 10) return 0.08;
+  if (zoom >= 7)  return 0.5;
+  if (zoom >= 5)  return 2;
+  return 12;
 }
 
-/**
- * Cluster `photos` into a grid whose cell size depends on `zoom`.
- * Each cell produces one {@link PhotoCluster} positioned at the centroid of
- * its members.
- */
 function clusterPhotos(photos: Photo[], zoom: number): PhotoCluster[] {
   if (photos.length === 0) return [];
   const cellDeg = zoomToCellDeg(zoom);
@@ -101,7 +148,6 @@ function clusterPhotos(photos: Photo[], zoom: number): PhotoCluster[] {
 
 // ── Collision detection ───────────────────────────────────────────────────────
 
-/** Screen-space bounding rectangle (in container pixels). */
 interface PixelRect {
   x: number;
   y: number;
@@ -109,7 +155,6 @@ interface PixelRect {
   h: number;
 }
 
-/** Returns true when two icon rectangles overlap after applying padding. */
 function rectsOverlap(a: PixelRect, b: PixelRect): boolean {
   return !(
     a.x + a.w + COLLISION_PAD < b.x - COLLISION_PAD ||
@@ -119,7 +164,6 @@ function rectsOverlap(a: PixelRect, b: PixelRect): boolean {
   );
 }
 
-/** Returns the [width, height] of the icon Leaflet will render for `cluster`. */
 function iconDims(cluster: PhotoCluster): [number, number] {
   const hasThumb = cluster.photos.some((p) => p.thumbnail_path);
   if (!hasThumb && cluster.photos.length === 1) return [36, 36 + ARROW_H];
@@ -127,15 +171,8 @@ function iconDims(cluster: PhotoCluster): [number, number] {
 }
 
 /**
- * Filters `clusters` so that no two rendered icons overlap in screen space.
- *
- * Algorithm (inspired by Leaflet.LayerGroup.Collision):
- * 1. Sort by descending photo count so larger clusters have the highest
- *    priority and are always shown first.
- * 2. Project each cluster centroid to a container-pixel rect using the map's
- *    current affine projection.
- * 3. Accept the cluster only if its rect does not collide with any
- *    already-accepted rect.
+ * Filters clusters so that no two rendered icons overlap in screen space.
+ * Larger clusters always win (sorted by descending photo count first).
  */
 function collisionFilter(
   clusters: PhotoCluster[],
@@ -144,7 +181,6 @@ function collisionFilter(
   const sorted = [...clusters].sort((a, b) => {
     if (b.photos.length !== a.photos.length)
       return b.photos.length - a.photos.length;
-    // Secondary: prefer clusters that have a thumbnail (larger visual footprint).
     const aT = a.photos.some((p) => p.thumbnail_path) ? 1 : 0;
     const bT = b.photos.some((p) => p.thumbnail_path) ? 1 : 0;
     return bT - aT;
@@ -156,8 +192,6 @@ function collisionFilter(
   for (const cluster of sorted) {
     const pt = map.latLngToContainerPoint([cluster.lat, cluster.lon]);
     const [w, h] = iconDims(cluster);
-    // Icon anchor is at bottom-centre, so the rect extends upward by h and
-    // left/right by w/2 from the projected point.
     const rect: PixelRect = { x: pt.x - w / 2, y: pt.y - h, w, h };
 
     if (!placed.some((p) => rectsOverlap(p, rect))) {
@@ -169,16 +203,53 @@ function collisionFilter(
   return visible;
 }
 
-// ── Custom Leaflet DivIcon markers ───────────────────────────────────────────
+// ── Convex hull ───────────────────────────────────────────────────────────────
 
 /**
- * Build a Leaflet `DivIcon` for the given cluster.
- *
- * - **Single photo with thumbnail**: `THUMB_SIZE`×`THUMB_SIZE` tile with a
- *   downward arrow tip.
- * - **Single photo without thumbnail**: compact camera-icon circle with arrow.
- * - **Cluster (>1 photo)**: thumbnail of the lead photo plus a count badge.
+ * Andrew's monotone-chain convex hull on a set of [lat, lon] points.
+ * Returns the hull vertices in CCW order. Returns the original points when
+ * fewer than 3 are provided.
  */
+function convexHull(points: [number, number][]): [number, number][] {
+  const n = points.length;
+  if (n < 3) return [...points];
+
+  const sorted = [...points].sort(
+    ([ax, ay], [bx, by]) => ax !== bx ? ax - bx : ay - by
+  );
+
+  const cross = (
+    O: [number, number],
+    A: [number, number],
+    B: [number, number]
+  ) => (A[0] - O[0]) * (B[1] - O[1]) - (A[1] - O[1]) * (B[0] - O[0]);
+
+  const lower: [number, number][] = [];
+  for (const p of sorted) {
+    while (
+      lower.length >= 2 &&
+      cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0
+    )
+      lower.pop();
+    lower.push(p);
+  }
+  const upper: [number, number][] = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const p = sorted[i];
+    while (
+      upper.length >= 2 &&
+      cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0
+    )
+      upper.pop();
+    upper.push(p);
+  }
+  lower.pop();
+  upper.pop();
+  return [...lower, ...upper];
+}
+
+// ── Icon factories ───────────────────────────────────────────────────────────
+
 function makeClusterIcon(cluster: PhotoCluster): L.DivIcon {
   const count = cluster.photos.length;
   const lead = cluster.photos.find((p) => p.thumbnail_path);
@@ -217,16 +288,43 @@ function makeClusterIcon(cluster: PhotoCluster): L.DivIcon {
   });
 }
 
+function makeTripIcon(td: TripData): L.DivIcon {
+  const label =
+    td.trip.name.length > 14
+      ? td.trip.name.slice(0, 14) + "…"
+      : td.trip.name;
+  const lead = td.photos.find((p) => p.thumbnail_path);
+  const countBadge = `<span class="photo-map-count" style="background:${td.color}">${td.photos.length}</span>`;
+
+  if (lead?.thumbnail_path) {
+    return L.divIcon({
+      className: "photo-map-marker photo-map-cluster",
+      html: `
+        <img src="${convertFileSrc(lead.thumbnail_path)}" class="photo-map-img" alt="" />
+        ${countBadge}
+        <span class="trip-map-label">${label}</span>
+      `,
+      iconSize: [THUMB_SIZE, THUMB_SIZE + ARROW_H + 20],
+      iconAnchor: [THUMB_SIZE / 2, THUMB_SIZE + ARROW_H + 20],
+    });
+  }
+  return L.divIcon({
+    className: "photo-map-marker photo-map-marker--no-thumb",
+    html: `
+      <span class="photo-map-fallback" style="background:${td.color}">✈️</span>
+      <span class="trip-map-label">${label}</span>
+    `,
+    iconSize: [60, 36 + ARROW_H + 20],
+    iconAnchor: [30, 36 + ARROW_H + 20],
+  });
+}
+
 // ── ViewportTracker ───────────────────────────────────────────────────────────
 
 interface ViewportTrackerProps {
   onViewportChange: (bounds: LatLngBounds, zoom: number) => void;
 }
 
-/**
- * Invisible component that lives inside `MapContainer` and fires
- * `onViewportChange` whenever the user pans or zooms.
- */
 function ViewportTracker({ onViewportChange }: ViewportTrackerProps) {
   const map = useMapEvents({
     moveend() {
@@ -237,7 +335,6 @@ function ViewportTracker({ onViewportChange }: ViewportTrackerProps) {
     },
   });
 
-  // Fire once immediately so the initial viewport is populated.
   useEffect(() => {
     onViewportChange(map.getBounds(), map.getZoom());
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -245,22 +342,58 @@ function ViewportTracker({ onViewportChange }: ViewportTrackerProps) {
   return null;
 }
 
+// ── JumpToTrip ────────────────────────────────────────────────────────────────
+
+/**
+ * Small dropdown rendered inside the MapContainer that pans+zooms to a
+ * selected trip. Must live inside `<MapContainer>` to access `useMap()`.
+ */
+function JumpToTrip({ tripDataList }: { tripDataList: TripData[] }) {
+  const map = useMap();
+  const [value, setValue] = useState("");
+
+  const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const id = Number(e.target.value);
+    setValue("");
+    if (!id) return;
+    const td = tripDataList.find((t) => t.trip.id === id);
+    if (!td) return;
+    map.fitBounds(
+      [
+        [td.bounds.minLat, td.bounds.minLon],
+        [td.bounds.maxLat, td.bounds.maxLon],
+      ],
+      { padding: [40, 40], maxZoom: 14 }
+    );
+  };
+
+  return (
+    <div className="jump-to-trip">
+      <select value={value} onChange={handleChange}>
+        <option value="">Jump to trip…</option>
+        {tripDataList.map((td) => (
+          <option key={td.trip.id} value={String(td.trip.id)}>
+            {td.trip.name} ({td.photos.length})
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 // ── PhotoViewer ───────────────────────────────────────────────────────────────
 
 interface PhotoViewerProps {
-  /** Photos to display.  Single-element array when opened from a lone marker. */
   photos: Photo[];
-  /** Index of the photo to show first. */
   initialIndex: number;
   onClose: () => void;
 }
 
 /**
- * Full-screen photo viewer rendered via a React portal above all other UI.
+ * Full-screen viewer for the original photo file (not the thumbnail).
  *
- * Always displays the **original file** (not the thumbnail).
- * Supports keyboard navigation (ArrowLeft / ArrowRight / Escape) and
- * prev/next buttons when `photos` contains more than one entry.
+ * The overlay dims the whole screen; prev/next/close controls float at fixed
+ * positions so they are always visible regardless of image size.
  */
 function PhotoViewer({ photos, initialIndex, onClose }: PhotoViewerProps) {
   const [index, setIndex] = useState(initialIndex);
@@ -279,49 +412,51 @@ function PhotoViewer({ photos, initialIndex, onClose }: PhotoViewerProps) {
     return () => window.removeEventListener("keydown", handler);
   }, [onClose, n]);
 
-  const stopPropagation = (e: React.MouseEvent) => e.stopPropagation();
+  const stop = (e: React.MouseEvent) => e.stopPropagation();
 
   return createPortal(
     <div className="photo-viewer-overlay" onClick={onClose}>
-      <div className="photo-viewer" onClick={stopPropagation}>
-        <button
-          className="photo-viewer-close"
-          onClick={onClose}
-          aria-label="Close"
-        >
-          ✕
-        </button>
+      {/* Fixed controls — always visible */}
+      <button
+        className="photo-viewer-close"
+        onClick={(e) => { stop(e); onClose(); }}
+        aria-label="Close"
+      >
+        ✕
+      </button>
 
-        <div className="photo-viewer-body">
-          {n > 1 && (
-            <button
-              className="photo-viewer-prev"
-              onClick={() => setIndex((i) => (i - 1 + n) % n)}
-              aria-label="Previous photo"
-            >
-              ‹
-            </button>
-          )}
-
-          <div className="photo-viewer-media">
-            <img
-              src={convertFileSrc(photo.file_path)}
-              className="photo-viewer-img"
-              alt={basename(photo.file_path)}
-            />
-          </div>
-
-          {n > 1 && (
-            <button
-              className="photo-viewer-next"
-              onClick={() => setIndex((i) => (i + 1) % n)}
-              aria-label="Next photo"
-            >
-              ›
-            </button>
-          )}
+      {n > 1 && (
+        <div className="photo-viewer-counter-badge" onClick={stop}>
+          {index + 1} / {n}
         </div>
+      )}
 
+      {n > 1 && (
+        <button
+          className="photo-viewer-prev"
+          onClick={(e) => { stop(e); setIndex((i) => (i - 1 + n) % n); }}
+          aria-label="Previous photo"
+        >
+          ‹
+        </button>
+      )}
+      {n > 1 && (
+        <button
+          className="photo-viewer-next"
+          onClick={(e) => { stop(e); setIndex((i) => (i + 1) % n); }}
+          aria-label="Next photo"
+        >
+          ›
+        </button>
+      )}
+
+      {/* Stage: stops click-through to overlay */}
+      <div className="photo-viewer-stage" onClick={stop}>
+        <img
+          src={convertFileSrc(photo.file_path)}
+          className="photo-viewer-img"
+          alt={basename(photo.file_path)}
+        />
         <div className="photo-viewer-info">
           <strong className="photo-viewer-name">
             {basename(photo.file_path)}
@@ -333,11 +468,6 @@ function PhotoViewer({ photos, initialIndex, onClose }: PhotoViewerProps) {
               {(photo.longitude as number).toFixed(5)}°
             </span>
           )}
-          {n > 1 && (
-            <span className="photo-viewer-counter">
-              {index + 1} / {n}
-            </span>
-          )}
         </div>
       </div>
     </div>,
@@ -345,7 +475,7 @@ function PhotoViewer({ photos, initialIndex, onClose }: PhotoViewerProps) {
   );
 }
 
-// ── ClusterBrowser ─────────────────────────────────────────────────────────────
+// ── ClusterBrowser ────────────────────────────────────────────────────────────
 
 interface ClusterBrowserProps {
   cluster: PhotoCluster;
@@ -353,14 +483,41 @@ interface ClusterBrowserProps {
 }
 
 /**
- * Centered modal showing a scrollable thumbnail grid for every photo in a
- * cluster.  Clicking any cell opens {@link PhotoViewer} for the original file.
- *
- * Rendered via a React portal so it sits above the map layer.
+ * Centered modal with a tight thumbnail grid for all photos in a cluster.
+ * Opens PhotoViewer (original file) on cell click.
+ * Triggers thumbnail generation for photos that lack one on mount.
  */
 function ClusterBrowser({ cluster, onClose }: ClusterBrowserProps) {
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
-  const n = cluster.photos.length;
+  const [localPhotos, setLocalPhotos] = useState<Photo[]>(cluster.photos);
+  const n = localPhotos.length;
+
+  // Kick off thumbnail generation for photos that are missing one.
+  useEffect(() => {
+    const needThumb = cluster.photos.filter((p) => !p.thumbnail_path);
+    if (needThumb.length === 0) return;
+    let cancelled = false;
+
+    void Promise.allSettled(
+      needThumb.map(async (photo) => {
+        try {
+          const thumbPath = await generateThumbnailForPhoto(photo.id);
+          if (!cancelled) {
+            setLocalPhotos((prev) =>
+              prev.map((p) =>
+                p.id === photo.id ? { ...p, thumbnail_path: thumbPath } : p
+              )
+            );
+          }
+        } catch {
+          // silently skip — the photo will remain a fallback icon
+        }
+      })
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [cluster.photos]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -395,7 +552,7 @@ function ClusterBrowser({ cluster, onClose }: ClusterBrowserProps) {
             </button>
           </div>
           <div className="cluster-browser-grid">
-            {cluster.photos.map((photo, index) => (
+            {localPhotos.map((photo, index) => (
               <button
                 key={photo.id}
                 className="cluster-browser-cell"
@@ -421,7 +578,99 @@ function ClusterBrowser({ cluster, onClose }: ClusterBrowserProps) {
 
       {viewerIndex !== null && (
         <PhotoViewer
-          photos={cluster.photos}
+          photos={localPhotos}
+          initialIndex={viewerIndex}
+          onClose={() => setViewerIndex(null)}
+        />
+      )}
+    </>,
+    document.body
+  );
+}
+
+// ── TripDetailPanel ───────────────────────────────────────────────────────────
+
+interface TripDetailPanelProps {
+  tripData: TripData;
+  onClose: () => void;
+}
+
+/**
+ * Centered modal showing the photo grid for a trip.
+ * Clicking any cell opens the full-size PhotoViewer.
+ */
+function TripDetailPanel({ tripData, onClose }: TripDetailPanelProps) {
+  const [viewerIndex, setViewerIndex] = useState<number | null>(null);
+  const n = tripData.photos.length;
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && viewerIndex === null) onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [viewerIndex, onClose]);
+
+  const stopPropagation = (e: React.MouseEvent) => e.stopPropagation();
+
+  return createPortal(
+    <>
+      <div
+        className="cluster-browser-overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-label={tripData.trip.name}
+        onClick={onClose}
+      >
+        <div className="cluster-browser" onClick={stopPropagation}>
+          <div className="cluster-browser-header">
+            <span className="cluster-browser-title">
+              <span
+                className="trip-detail-dot"
+                style={{ background: tripData.color }}
+              />
+              {tripData.trip.name}
+              <span className="trip-detail-count">
+                {" "}
+                · {n} photo{n !== 1 ? "s" : ""}
+              </span>
+            </span>
+            <button
+              className="cluster-browser-close"
+              onClick={onClose}
+              aria-label="Close"
+            >
+              ✕
+            </button>
+          </div>
+          <div className="cluster-browser-grid">
+            {tripData.photos.map((photo, index) => (
+              <button
+                key={photo.id}
+                className="cluster-browser-cell"
+                onClick={() => setViewerIndex(index)}
+                title={basename(photo.file_path)}
+              >
+                {photo.thumbnail_path ? (
+                  <img
+                    src={convertFileSrc(photo.thumbnail_path)}
+                    className="cluster-browser-thumb"
+                    alt=""
+                  />
+                ) : (
+                  <span className="cluster-browser-no-thumb" aria-hidden="true">
+                    📷
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {viewerIndex !== null && (
+        <PhotoViewer
+          photos={tripData.photos}
           initialIndex={viewerIndex}
           onClose={() => setViewerIndex(null)}
         />
@@ -434,35 +683,92 @@ function ClusterBrowser({ cluster, onClose }: ClusterBrowserProps) {
 // ── MapView ───────────────────────────────────────────────────────────────────
 
 interface MapViewProps {
-  /** True when this tab panel is the currently visible tab. */
   isActive: boolean;
 }
 
 export function MapView({ isActive }: MapViewProps) {
+  const [mapMode, setMapMode] = useState<MapMode>("photos");
+
+  // ── Photos-mode state ─────────────────────────────────────────────────────
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedCluster, setSelectedCluster] = useState<PhotoCluster | null>(
-    null
-  );
-  /** Photos to show in the single-marker photo viewer. */
+  const [selectedCluster, setSelectedCluster] = useState<PhotoCluster | null>(null);
   const [viewerPhotos, setViewerPhotos] = useState<Photo[] | null>(null);
-  /**
-   * Incremented on every pan/zoom so that `visibleClusters` recomputes even
-   * when the photo set hasn't changed (pixel positions shift on pan).
-   */
   const [viewportVersion, setViewportVersion] = useState(0);
+
+  // ── Trips-mode state ──────────────────────────────────────────────────────
+  const [tripDataList, setTripDataList] = useState<TripData[]>([]);
+  const [loadingTrips, setLoadingTrips] = useState(false);
+  const [selectedTrip, setSelectedTrip] = useState<TripData | null>(null);
+  /** True once trip data has been fetched (avoid re-fetching on tab switch). */
+  const tripsLoadedRef = useRef(false);
+
   const mapRef = useRef<LeafletMap | null>(null);
 
-  // Leaflet measures the container on init; if the panel is hidden (display:none)
-  // at that point the map size is 0×0 and tiles never load.  Call invalidateSize()
-  // whenever the tab becomes active so Leaflet recalculates and renders correctly.
   useEffect(() => {
-    if (isActive) {
-      mapRef.current?.invalidateSize();
-    }
+    if (isActive) mapRef.current?.invalidateSize();
   }, [isActive]);
+
+  // ── Load trip data when trips mode is first activated ─────────────────────
+  useEffect(() => {
+    if (mapMode !== "trips" || tripsLoadedRef.current) return;
+    tripsLoadedRef.current = true;
+
+    (async () => {
+      setLoadingTrips(true);
+      try {
+        const trips = await listTrips({ limit: 500, offset: 0 });
+        const settled = await Promise.allSettled(
+          trips.map(async (trip, idx): Promise<TripData | null> => {
+            const photos = await queryPhotosByTrip(trip.id, {
+              limit: 500,
+              offset: 0,
+            });
+            const geoPhotos = photos.filter(
+              (p) => p.latitude !== null && p.longitude !== null
+            );
+            if (geoPhotos.length === 0) return null;
+
+            const lats = geoPhotos.map((p) => p.latitude!);
+            const lons = geoPhotos.map((p) => p.longitude!);
+            const bounds: TripBounds = {
+              minLat: Math.min(...lats),
+              maxLat: Math.max(...lats),
+              minLon: Math.min(...lons),
+              maxLon: Math.max(...lons),
+              centLat: lats.reduce((a, b) => a + b, 0) / lats.length,
+              centLon: lons.reduce((a, b) => a + b, 0) / lons.length,
+            };
+            const hullPts: [number, number][] = geoPhotos.map((p) => [
+              p.latitude!,
+              p.longitude!,
+            ]);
+            return {
+              trip,
+              photos: geoPhotos,
+              bounds,
+              hull: convexHull(hullPts),
+              color: TRIP_COLORS[idx % TRIP_COLORS.length],
+            };
+          })
+        );
+        const results: TripData[] = settled
+          .filter(
+            (r): r is PromiseFulfilledResult<TripData | null> =>
+              r.status === "fulfilled"
+          )
+          .map((r) => r.value)
+          .filter((v): v is TripData => v !== null);
+        setTripDataList(results);
+      } catch {
+        // trip loading errors are non-fatal
+      } finally {
+        setLoadingTrips(false);
+      }
+    })();
+  }, [mapMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleViewportChange = useCallback(
     async (bounds: LatLngBounds, newZoom: number) => {
@@ -489,35 +795,63 @@ export function MapView({ isActive }: MapViewProps) {
     []
   );
 
-  /** Re-cluster whenever the photo list or zoom level changes. */
   const clusters = useMemo(
     () => clusterPhotos(photos, zoom),
     [photos, zoom]
   );
 
-  /**
-   * Apply pixel-space collision filtering after grid clustering so that
-   * overlapping pins are suppressed.  Larger clusters always win.
-   *
-   * Re-runs on every pan/zoom via `viewportVersion` — even if `clusters`
-   * didn't change, pixel positions shift whenever the map moves.
-   */
   const visibleClusters = useMemo(() => {
     if (!mapRef.current) return clusters;
     return collisionFilter(clusters, mapRef.current);
-    // viewportVersion is intentionally included; mapRef.current is stable.
   }, [clusters, viewportVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleTripClick = useCallback(
+    (td: TripData) => {
+      setSelectedTrip(td);
+      mapRef.current?.fitBounds(
+        [
+          [td.bounds.minLat, td.bounds.minLon],
+          [td.bounds.maxLat, td.bounds.maxLon],
+        ],
+        { padding: [40, 40], maxZoom: 14 }
+      );
+    },
+    []
+  );
 
   return (
     <div className="map-view">
-      {/* Status overlay */}
+      {/* Mode toggle */}
+      <div className="map-mode-toggle">
+        <button
+          className={`map-mode-btn${mapMode === "photos" ? " active" : ""}`}
+          onClick={() => setMapMode("photos")}
+        >
+          📷 Photos
+        </button>
+        <button
+          className={`map-mode-btn${mapMode === "trips" ? " active" : ""}`}
+          onClick={() => setMapMode("trips")}
+        >
+          ✈️ Trips
+        </button>
+      </div>
+
+      {/* Status bar */}
       <div className="map-status-bar">
-        {loading && <span className="map-status-loading">Loading…</span>}
-        {!loading && !error && (
+        {(loading || loadingTrips) && (
+          <span className="map-status-loading">Loading…</span>
+        )}
+        {!loading && !loadingTrips && !error && mapMode === "photos" && (
           <span className="map-status-count">
             {photos.length === BBOX_PAGE_SIZE
               ? `${BBOX_PAGE_SIZE}+ geotagged photos in view`
               : `${photos.length} geotagged photo${photos.length !== 1 ? "s" : ""} in view`}
+          </span>
+        )}
+        {!loading && !loadingTrips && !error && mapMode === "trips" && (
+          <span className="map-status-count">
+            {tripDataList.length} trip{tripDataList.length !== 1 ? "s" : ""} with GPS data
           </span>
         )}
         {error && (
@@ -540,22 +874,80 @@ export function MapView({ isActive }: MapViewProps) {
 
         <ViewportTracker onViewportChange={handleViewportChange} />
 
-        {visibleClusters.map((cluster) => {
-          const icon = makeClusterIcon(cluster);
-          const isCluster = cluster.photos.length > 1;
-          return (
-            <Marker
-              key={cluster.key}
-              position={[cluster.lat, cluster.lon]}
-              icon={icon}
-              eventHandlers={{
-                click: isCluster
-                  ? () => setSelectedCluster(cluster)
-                  : () => setViewerPhotos([cluster.photos[0]]),
+        {/* ── Photos mode markers ───────────────────────────────────────────── */}
+        {mapMode === "photos" &&
+          visibleClusters.map((cluster) => {
+            const icon = makeClusterIcon(cluster);
+            const isCluster = cluster.photos.length > 1;
+            return (
+              <Marker
+                key={cluster.key}
+                position={[cluster.lat, cluster.lon]}
+                icon={icon}
+                eventHandlers={{
+                  click: isCluster
+                    ? () => setSelectedCluster(cluster)
+                    : () => setViewerPhotos([cluster.photos[0]]),
+                }}
+              />
+            );
+          })}
+
+        {/* ── Trips mode overlays ───────────────────────────────────────────── */}
+        {mapMode === "trips" &&
+          tripDataList.map((td) => (
+            <Polygon
+              key={td.trip.id}
+              positions={td.hull}
+              pathOptions={{
+                color: td.color,
+                fillColor: td.color,
+                fillOpacity: 0.13,
+                weight: 2.5,
+                opacity: 0.75,
               }}
+              eventHandlers={{ click: () => handleTripClick(td) }}
+            >
+              <Tooltip sticky>{td.trip.name}</Tooltip>
+            </Polygon>
+          ))}
+
+        {/* Trip centroid markers (low zoom) */}
+        {mapMode === "trips" &&
+          zoom < TRIP_DETAIL_ZOOM &&
+          tripDataList.map((td) => (
+            <Marker
+              key={`trip-marker-${td.trip.id}`}
+              position={[td.bounds.centLat, td.bounds.centLon]}
+              icon={makeTripIcon(td)}
+              eventHandlers={{ click: () => handleTripClick(td) }}
             />
-          );
-        })}
+          ))}
+
+        {/* Individual photo markers at high zoom in trips mode */}
+        {mapMode === "trips" &&
+          zoom >= TRIP_DETAIL_ZOOM &&
+          visibleClusters.map((cluster) => {
+            const icon = makeClusterIcon(cluster);
+            const isCluster = cluster.photos.length > 1;
+            return (
+              <Marker
+                key={cluster.key}
+                position={[cluster.lat, cluster.lon]}
+                icon={icon}
+                eventHandlers={{
+                  click: isCluster
+                    ? () => setSelectedCluster(cluster)
+                    : () => setViewerPhotos([cluster.photos[0]]),
+                }}
+              />
+            );
+          })}
+
+        {/* Jump to trip dropdown — inside MapContainer to access useMap() */}
+        {mapMode === "trips" && tripDataList.length > 0 && (
+          <JumpToTrip tripDataList={tripDataList} />
+        )}
       </MapContainer>
 
       {selectedCluster && (
@@ -570,6 +962,13 @@ export function MapView({ isActive }: MapViewProps) {
           photos={viewerPhotos}
           initialIndex={0}
           onClose={() => setViewerPhotos(null)}
+        />
+      )}
+
+      {selectedTrip && (
+        <TripDetailPanel
+          tripData={selectedTrip}
+          onClose={() => setSelectedTrip(null)}
         />
       )}
     </div>
