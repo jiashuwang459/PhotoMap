@@ -1415,6 +1415,12 @@
   margin-top: 2px;
 }
 
+/* Label variant that appears above the thumbnail thumbnail */
+.trip-map-label--top {
+  margin-top: 0;
+  margin-bottom: 2px;
+}
+
 /* ── Trip detail panel ───────────────────────────────────────────────────────── */
 
 .trip-detail-dot {

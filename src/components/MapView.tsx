@@ -47,7 +47,13 @@ const COLLISION_PAD = 6;
  * Zoom level at which TripMapView switches from trip-centroid markers to
  * individual photo markers. Higher value = centroid markers persist longer.
  */
-const TRIP_DETAIL_ZOOM = 13;
+const TRIP_DETAIL_ZOOM = 14;
+
+/**
+ * At or below this zoom, clicking a trip centroid marker zooms in rather
+ * than opening the TripDetailPanel directly.
+ */
+const TRIP_ZOOM_IN_THRESHOLD = 10;
 
 /** Rotating colour palette for trip overlays. */
 const TRIP_COLORS = [
@@ -118,6 +124,7 @@ function zoomToCellDeg(zoom: number): number {
   if (zoom >= 14) return 0.004;
   if (zoom >= 12) return 0.015;
   if (zoom >= 10) return 0.08;
+  if (zoom >= 9)  return 0.18;
   if (zoom >= 7)  return 0.5;
   if (zoom >= 5)  return 2;
   return 12;
@@ -302,9 +309,9 @@ function makeTripIcon(td: TripData): L.DivIcon {
     return L.divIcon({
       className: "photo-map-marker photo-map-cluster",
       html: `
+        <span class="trip-map-label trip-map-label--top">${label}</span>
         <img src="${convertFileSrc(lead.thumbnail_path)}" class="photo-map-img" alt="" />
         ${countBadge}
-        <span class="trip-map-label">${label}</span>
       `,
       iconSize: [THUMB_SIZE, THUMB_SIZE + ARROW_H + 20],
       iconAnchor: [THUMB_SIZE / 2, THUMB_SIZE + ARROW_H + 20],
@@ -313,8 +320,8 @@ function makeTripIcon(td: TripData): L.DivIcon {
   return L.divIcon({
     className: "photo-map-marker photo-map-marker--no-thumb",
     html: `
+      <span class="trip-map-label trip-map-label--top">${label}</span>
       <span class="photo-map-fallback" style="background:${td.color}">✈️</span>
-      <span class="trip-map-label">${label}</span>
     `,
     iconSize: [60, 36 + ARROW_H + 20],
     iconAnchor: [30, 36 + ARROW_H + 20],
@@ -372,8 +379,15 @@ function JumpToTrip({ tripDataList }: { tripDataList: TripData[] }) {
     if (!id) return;
     const td = tripDataList.find((t) => t.trip.id === id);
     if (!td) return;
-    // Fly to the polygon centroid — more stable than fitBounds for small trips.
-    map.setView([td.bounds.centLat, td.bounds.centLon], 11, { animate: true });
+    // fitBounds will pick the tightest zoom that shows the whole trip, capped
+    // at zoom 13 — small trips zoom to 13, large trips fit at a lower zoom.
+    map.fitBounds(
+      [
+        [td.bounds.minLat, td.bounds.minLon],
+        [td.bounds.maxLat, td.bounds.maxLon],
+      ],
+      { padding: [40, 40], maxZoom: 13, animate: true }
+    );
   };
 
   return (
@@ -801,7 +815,7 @@ export function MapView({ isActive }: MapViewProps) {
   const [viewerPhotos, setViewerPhotos] = useState<Photo[] | null>(null);
   const [viewportVersion, setViewportVersion] = useState(0);
   /** Whether the pixel-space collision filter is active. */
-  const [useCollisionFilter, setUseCollisionFilter] = useState(true);
+  const [useCollisionFilter, setUseCollisionFilter] = useState(false);
 
   // ── Trips-mode state ──────────────────────────────────────────────────────
   const [tripDataList, setTripDataList] = useState<TripData[]>([]);
@@ -843,8 +857,10 @@ export function MapView({ isActive }: MapViewProps) {
               maxLat: Math.max(...lats),
               minLon: Math.min(...lons),
               maxLon: Math.max(...lons),
-              centLat: lats.reduce((a, b) => a + b, 0) / lats.length,
-              centLon: lons.reduce((a, b) => a + b, 0) / lons.length,
+              // Use the bounding-box midpoint as the polygon centre so the
+              // pin sits in the visual middle of the hull regardless of photo density.
+              centLat: (Math.min(...lats) + Math.max(...lats)) / 2,
+              centLon: (Math.min(...lons) + Math.max(...lons)) / 2,
             };
             const hullPts: [number, number][] = geoPhotos.map((p) => [
               p.latitude!,
@@ -920,6 +936,28 @@ export function MapView({ isActive }: MapViewProps) {
         ],
         { padding: [40, 40], maxZoom: 14 }
       );
+    },
+    []
+  );
+
+  /**
+   * Click handler for trip centroid markers.
+   * At low zoom (≤ TRIP_ZOOM_IN_THRESHOLD) we zoom in instead of opening
+   * the detail panel — the user should zoom in more before drilling down.
+   */
+  const handleTripMarkerClick = useCallback(
+    (td: TripData, currentZoom: number) => {
+      if (currentZoom <= TRIP_ZOOM_IN_THRESHOLD) {
+        mapRef.current?.fitBounds(
+          [
+            [td.bounds.minLat, td.bounds.minLon],
+            [td.bounds.maxLat, td.bounds.maxLon],
+          ],
+          { padding: [40, 40], maxZoom: 13, animate: true }
+        );
+      } else {
+        setSelectedTrip(td);
+      }
     },
     []
   );
@@ -1039,7 +1077,7 @@ export function MapView({ isActive }: MapViewProps) {
               key={`trip-marker-${td.trip.id}`}
               position={[td.bounds.centLat, td.bounds.centLon]}
               icon={makeTripIcon(td)}
-              eventHandlers={{ click: () => handleTripClick(td) }}
+              eventHandlers={{ click: () => handleTripMarkerClick(td, zoom) }}
             />
           ))}
 
