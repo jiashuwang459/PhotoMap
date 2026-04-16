@@ -1310,6 +1310,26 @@
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
 }
 
+.map-mode-btn--icon {
+  padding: 0.28rem 0.55rem;
+  font-size: 1rem;
+  line-height: 1;
+  color: #aaa;
+}
+
+.map-mode-btn--icon.active {
+  color: #1a73e8;
+}
+
+.map-mode-divider {
+  width: 1px;
+  height: 1.2rem;
+  background: #ddd;
+  margin: 0 2px;
+  align-self: center;
+  flex-shrink: 0;
+}
+
 /* ── Jump-to-trip dropdown ───────────────────────────────────────────────────── */
 
 .jump-to-trip {
@@ -1330,6 +1350,53 @@
   cursor: pointer;
   max-width: 200px;
   background: transparent;
+}
+
+/* ── Zoom slider ─────────────────────────────────────────────────────────────── */
+
+.zoom-slider-ctrl {
+  position: absolute;
+  bottom: 28px;
+  left: 10px;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.93);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  padding: 5px 8px;
+}
+
+.zoom-slider-btn {
+  background: none;
+  border: none;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #444;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 2px;
+  width: 1.4rem;
+  text-align: center;
+}
+
+.zoom-slider-btn:hover {
+  color: #1a73e8;
+}
+
+.zoom-slider-input {
+  width: 110px;
+  cursor: pointer;
+  accent-color: #1a73e8;
+}
+
+.zoom-slider-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #555;
+  min-width: 1.4rem;
+  text-align: center;
 }
 
 /* ── Trip map label ──────────────────────────────────────────────────────────── */

@@ -11,12 +11,14 @@ import {
   useMapEvents,
 } from "react-leaflet";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { Map as LeafletMap, LatLngBounds } from "leaflet";
 import {
-  generateThumbnailForPhoto,
+  getPhotoByPath,
   listTrips,
   queryByBoundingBox,
   queryPhotosByTrip,
+  startThumbnailWorker,
 } from "../api/photos";
 import type { BoundingBox, Page, Photo, Trip } from "../api/types";
 
@@ -43,9 +45,9 @@ const COLLISION_PAD = 6;
 
 /**
  * Zoom level at which TripMapView switches from trip-centroid markers to
- * individual photo markers.
+ * individual photo markers. Higher value = centroid markers persist longer.
  */
-const TRIP_DETAIL_ZOOM = 10;
+const TRIP_DETAIL_ZOOM = 13;
 
 /** Rotating colour palette for trip overlays. */
 const TRIP_COLORS = [
@@ -345,38 +347,103 @@ function ViewportTracker({ onViewportChange }: ViewportTrackerProps) {
 // ── JumpToTrip ────────────────────────────────────────────────────────────────
 
 /**
- * Small dropdown rendered inside the MapContainer that pans+zooms to a
- * selected trip. Must live inside `<MapContainer>` to access `useMap()`.
+ * Small dropdown rendered inside the MapContainer that flies to a selected
+ * trip's centroid. Must live inside `<MapContainer>` to access `useMap()`.
+ *
+ * `L.DomEvent.disableClickPropagation` prevents map interactions from leaking
+ * through the control.
  */
 function JumpToTrip({ tripDataList }: { tripDataList: TripData[] }) {
   const map = useMap();
-  const [value, setValue] = useState("");
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // Prevent map click/scroll from bleeding through the control.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    L.DomEvent.disableClickPropagation(el);
+    L.DomEvent.disableScrollPropagation(el);
+  }, []);
 
   const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const id = Number(e.target.value);
-    setValue("");
+    // Blur immediately so the map doesn't receive stray mouse events.
+    e.target.blur();
     if (!id) return;
     const td = tripDataList.find((t) => t.trip.id === id);
     if (!td) return;
-    map.fitBounds(
-      [
-        [td.bounds.minLat, td.bounds.minLon],
-        [td.bounds.maxLat, td.bounds.maxLon],
-      ],
-      { padding: [40, 40], maxZoom: 14 }
-    );
+    // Fly to the polygon centroid — more stable than fitBounds for small trips.
+    map.setView([td.bounds.centLat, td.bounds.centLon], 11, { animate: true });
   };
 
   return (
-    <div className="jump-to-trip">
-      <select value={value} onChange={handleChange}>
-        <option value="">Jump to trip…</option>
+    <div ref={containerRef} className="jump-to-trip">
+      <select defaultValue="" onChange={handleChange}>
+        <option value="" disabled>
+          Jump to trip…
+        </option>
         {tripDataList.map((td) => (
           <option key={td.trip.id} value={String(td.trip.id)}>
             {td.trip.name} ({td.photos.length})
           </option>
         ))}
       </select>
+    </div>
+  );
+}
+
+// ── ZoomSlider ────────────────────────────────────────────────────────────────
+
+/**
+ * Horizontal zoom slider rendered at the bottom-left of the map.
+ * Replaces the default Leaflet zoom control (disabled via `zoomControl={false}`
+ * on MapContainer).
+ */
+function ZoomSlider() {
+  const map = useMap();
+  const [currentZoom, setCurrentZoom] = useState(map.getZoom());
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useMapEvents({
+    zoomend() {
+      setCurrentZoom(map.getZoom());
+    },
+  });
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    L.DomEvent.disableClickPropagation(el);
+    L.DomEvent.disableScrollPropagation(el);
+  }, []);
+
+  return (
+    <div ref={containerRef} className="zoom-slider-ctrl">
+      <button
+        className="zoom-slider-btn"
+        onClick={() => map.setZoom(map.getZoom() - 1)}
+        aria-label="Zoom out"
+      >
+        −
+      </button>
+      <input
+        type="range"
+        className="zoom-slider-input"
+        min={map.getMinZoom() || 1}
+        max={map.getMaxZoom() || 18}
+        step={1}
+        value={currentZoom}
+        onChange={(e) => map.setZoom(Number(e.target.value))}
+        aria-label="Zoom level"
+      />
+      <button
+        className="zoom-slider-btn"
+        onClick={() => map.setZoom(map.getZoom() + 1)}
+        aria-label="Zoom in"
+      >
+        +
+      </button>
+      <span className="zoom-slider-label">{currentZoom}</span>
     </div>
   );
 }
@@ -485,39 +552,75 @@ interface ClusterBrowserProps {
 /**
  * Centered modal with a tight thumbnail grid for all photos in a cluster.
  * Opens PhotoViewer (original file) on cell click.
- * Triggers thumbnail generation for photos that lack one on mount.
+ *
+ * Kicks off the background thumbnail worker for any photos that lack a
+ * thumbnail, then listens for `thumbnail_progress` / `thumbnail_done` events
+ * to refresh those photos' thumbnail paths progressively.
  */
 function ClusterBrowser({ cluster, onClose }: ClusterBrowserProps) {
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
   const [localPhotos, setLocalPhotos] = useState<Photo[]>(cluster.photos);
   const n = localPhotos.length;
 
-  // Kick off thumbnail generation for photos that are missing one.
+  // Use a ref so the async refresh closure always sees the latest snapshot.
+  const localPhotosRef = useRef<Photo[]>(cluster.photos);
+  useEffect(() => {
+    localPhotosRef.current = localPhotos;
+  }, [localPhotos]);
+
+  // Kick the background thumbnail worker and listen for progress events.
   useEffect(() => {
     const needThumb = cluster.photos.filter((p) => !p.thumbnail_path);
     if (needThumb.length === 0) return;
-    let cancelled = false;
 
-    void Promise.allSettled(
-      needThumb.map(async (photo) => {
-        try {
-          const thumbPath = await generateThumbnailForPhoto(photo.id);
-          if (!cancelled) {
-            setLocalPhotos((prev) =>
-              prev.map((p) =>
-                p.id === photo.id ? { ...p, thumbnail_path: thumbPath } : p
-              )
-            );
+    // Start (or restart) the worker so it processes photos without thumbnails.
+    void startThumbnailWorker(10).catch(() => {
+      /* worker may already be running — that's fine */
+    });
+
+    let active = true;
+
+    // Re-check each still-missing photo after every progress tick.
+    const refreshMissing = async () => {
+      if (!active) return;
+      const current = localPhotosRef.current;
+      const missing = current.filter((p) => !p.thumbnail_path);
+      if (missing.length === 0) return;
+
+      const results = await Promise.allSettled(
+        missing.map((p) => getPhotoByPath(p.file_path))
+      );
+      if (!active) return;
+
+      setLocalPhotos((prev) => {
+        const copy = [...prev];
+        results.forEach((r, i) => {
+          if (r.status === "fulfilled" && r.value?.thumbnail_path) {
+            const idx = copy.findIndex((p) => p.id === missing[i].id);
+            if (idx !== -1)
+              copy[idx] = {
+                ...copy[idx],
+                thumbnail_path: r.value!.thumbnail_path,
+              };
           }
-        } catch {
-          // silently skip — the photo will remain a fallback icon
-        }
-      })
-    );
-    return () => {
-      cancelled = true;
+        });
+        return copy;
+      });
     };
-  }, [cluster.photos]);
+
+    const unlistenProgress = listen("thumbnail_progress", () => {
+      void refreshMissing();
+    });
+    const unlistenDone = listen("thumbnail_done", () => {
+      void refreshMissing();
+    });
+
+    return () => {
+      active = false;
+      void unlistenProgress.then((fn) => fn());
+      void unlistenDone.then((fn) => fn());
+    };
+  }, [cluster.photos]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -697,6 +800,8 @@ export function MapView({ isActive }: MapViewProps) {
   const [selectedCluster, setSelectedCluster] = useState<PhotoCluster | null>(null);
   const [viewerPhotos, setViewerPhotos] = useState<Photo[] | null>(null);
   const [viewportVersion, setViewportVersion] = useState(0);
+  /** Whether the pixel-space collision filter is active. */
+  const [useCollisionFilter, setUseCollisionFilter] = useState(true);
 
   // ── Trips-mode state ──────────────────────────────────────────────────────
   const [tripDataList, setTripDataList] = useState<TripData[]>([]);
@@ -801,9 +906,9 @@ export function MapView({ isActive }: MapViewProps) {
   );
 
   const visibleClusters = useMemo(() => {
-    if (!mapRef.current) return clusters;
+    if (!useCollisionFilter || !mapRef.current) return clusters;
     return collisionFilter(clusters, mapRef.current);
-  }, [clusters, viewportVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [clusters, viewportVersion, useCollisionFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleTripClick = useCallback(
     (td: TripData) => {
@@ -821,7 +926,7 @@ export function MapView({ isActive }: MapViewProps) {
 
   return (
     <div className="map-view">
-      {/* Mode toggle */}
+      {/* Mode toggle + collision filter toggle */}
       <div className="map-mode-toggle">
         <button
           className={`map-mode-btn${mapMode === "photos" ? " active" : ""}`}
@@ -834,6 +939,19 @@ export function MapView({ isActive }: MapViewProps) {
           onClick={() => setMapMode("trips")}
         >
           ✈️ Trips
+        </button>
+        <div className="map-mode-divider" />
+        <button
+          className={`map-mode-btn map-mode-btn--icon${useCollisionFilter ? " active" : ""}`}
+          onClick={() => setUseCollisionFilter((v) => !v)}
+          title={
+            useCollisionFilter
+              ? "Collision filter ON — click to disable"
+              : "Collision filter OFF — click to enable"
+          }
+          aria-pressed={useCollisionFilter}
+        >
+          ⊙
         </button>
       </div>
 
@@ -865,6 +983,7 @@ export function MapView({ isActive }: MapViewProps) {
         center={DEFAULT_CENTER}
         zoom={DEFAULT_ZOOM}
         className="leaflet-map"
+        zoomControl={false}
         ref={mapRef}
       >
         <TileLayer
@@ -948,6 +1067,9 @@ export function MapView({ isActive }: MapViewProps) {
         {mapMode === "trips" && tripDataList.length > 0 && (
           <JumpToTrip tripDataList={tripDataList} />
         )}
+
+        {/* Zoom slider — replaces the default Leaflet zoom control */}
+        <ZoomSlider />
       </MapContainer>
 
       {selectedCluster && (
