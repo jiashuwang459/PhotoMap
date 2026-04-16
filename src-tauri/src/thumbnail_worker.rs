@@ -131,7 +131,6 @@ pub fn thumbnail_worker_loop(
                 Ok(ThumbnailCommand::Start { .. }) => {
                     // Re-start: reset counters and continue.
                     done = 0;
-                    total = 0;
                 }
                 Err(TryRecvError::Empty) => {}        // nothing pending
                 Err(TryRecvError::Disconnected) => return, // app exiting
