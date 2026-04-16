@@ -955,6 +955,21 @@
   position: relative;
 }
 
+/* Downward-pointing arrow tip anchored at the geographic location. */
+.photo-map-marker::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-top: 10px solid #fff;
+  pointer-events: none;
+}
+
 .photo-map-img {
   width: 52px;
   height: 52px;
@@ -1030,6 +1045,249 @@
 .map-popup-cluster-more {
   color: #999;
   font-style: italic;
+}
+
+/* ── Cluster browser modal ───────────────────────────────────────────────────── */
+
+.cluster-browser-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 0;
+}
+
+.cluster-browser {
+  background: #fff;
+  border-radius: 14px 14px 0 0;
+  width: 100%;
+  max-width: 680px;
+  max-height: 72vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+}
+
+.cluster-browser-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.85rem 1rem 0.65rem;
+  border-bottom: 1px solid #eee;
+  flex-shrink: 0;
+}
+
+.cluster-browser-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #1a1a2e;
+}
+
+.cluster-browser-close {
+  background: none;
+  border: none;
+  font-size: 1rem;
+  color: #888;
+  cursor: pointer;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.cluster-browser-close:hover {
+  background: #f0f0f0;
+  color: #333;
+}
+
+.cluster-browser-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 0.5rem;
+  padding: 0.75rem;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.cluster-browser-cell {
+  background: none;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.4rem;
+  transition: background 0.15s;
+  text-align: center;
+}
+
+.cluster-browser-cell:hover {
+  background: #f4f6fb;
+}
+
+.cluster-browser-thumb {
+  width: 90px;
+  height: 90px;
+  object-fit: cover;
+  border-radius: 6px;
+  display: block;
+}
+
+.cluster-browser-no-thumb {
+  width: 90px;
+  height: 90px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #e8edf5;
+  border-radius: 6px;
+  font-size: 2rem;
+}
+
+.cluster-browser-caption {
+  font-size: 0.68rem;
+  color: #555;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 90px;
+}
+
+/* ── Cluster lightbox ────────────────────────────────────────────────────────── */
+
+.cluster-lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2100;
+  background: rgba(0, 0, 0, 0.82);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cluster-lightbox {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: 90vw;
+  max-height: 90vh;
+}
+
+.cluster-lightbox-close {
+  position: absolute;
+  top: -2.5rem;
+  right: 0;
+  background: rgba(255, 255, 255, 0.15);
+  border: none;
+  color: #fff;
+  font-size: 1.1rem;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cluster-lightbox-close:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.cluster-lightbox-body {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.cluster-lightbox-prev,
+.cluster-lightbox-next {
+  background: rgba(255, 255, 255, 0.15);
+  border: none;
+  color: #fff;
+  font-size: 2rem;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.cluster-lightbox-prev:hover,
+.cluster-lightbox-next:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.cluster-lightbox-media {
+  max-width: min(70vw, 560px);
+  max-height: 65vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cluster-lightbox-img {
+  max-width: 100%;
+  max-height: 65vh;
+  border-radius: 8px;
+  object-fit: contain;
+  display: block;
+}
+
+.cluster-lightbox-no-thumb {
+  width: 200px;
+  height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #2a2a3e;
+  border-radius: 8px;
+  font-size: 4rem;
+}
+
+.cluster-lightbox-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  color: #fff;
+  text-align: center;
+}
+
+.cluster-lightbox-name {
+  font-size: 0.9rem;
+  font-weight: 700;
+  max-width: 50ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cluster-lightbox-date {
+  font-size: 0.8rem;
+  opacity: 0.8;
+}
+
+.cluster-lightbox-gps {
+  font-size: 0.75rem;
+  color: #7ab3f8;
+}
+
+.cluster-lightbox-counter {
+  font-size: 0.75rem;
+  opacity: 0.6;
+  margin-top: 0.1rem;
 }
 
 /* ── Recently-scanned directories ─────────────────────────────────────────── */

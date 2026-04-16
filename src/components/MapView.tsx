@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import L from "leaflet";
 import {
   MapContainer,
@@ -97,11 +98,14 @@ function clusterPhotos(photos: Photo[], zoom: number): PhotoCluster[] {
 /**
  * Build a Leaflet `DivIcon` for the given cluster.
  *
- * - **Single photo with thumbnail**: 52×52 thumbnail tile, rounded with drop
- *   shadow — similar to Apple Maps photo markers.
- * - **Single photo without thumbnail**: compact camera-icon circle.
+ * - **Single photo with thumbnail**: 52×52 thumbnail tile with a downward
+ *   arrow tip, rounded with drop shadow — similar to Apple Maps photo markers.
+ * - **Single photo without thumbnail**: compact camera-icon circle with arrow.
  * - **Cluster (>1 photo)**: thumbnail of the first photo that has one, plus
- *   a count badge in the top-right corner.
+ *   a count badge in the top-right corner, with an arrow tip.
+ *
+ * All markers are 10 px taller than their visible tile to accommodate the CSS
+ * arrow rendered via `.photo-map-marker::after`.
  */
 function makeClusterIcon(cluster: PhotoCluster): L.DivIcon {
   const count = cluster.photos.length;
@@ -113,17 +117,18 @@ function makeClusterIcon(cluster: PhotoCluster): L.DivIcon {
       return L.divIcon({
         className: "photo-map-marker",
         html: `<img src="${convertFileSrc(photo.thumbnail_path)}" class="photo-map-img" alt="" />`,
-        iconSize: [52, 52],
-        iconAnchor: [26, 52],
-        popupAnchor: [0, -56],
+        // Extra 10 px height for the CSS arrow rendered via ::after.
+        iconSize: [52, 62],
+        iconAnchor: [26, 62],
+        popupAnchor: [0, -66],
       });
     }
     return L.divIcon({
       className: "photo-map-marker photo-map-marker--no-thumb",
       html: `<span class="photo-map-fallback">📷</span>`,
-      iconSize: [36, 36],
-      iconAnchor: [18, 36],
-      popupAnchor: [0, -38],
+      iconSize: [36, 46],
+      iconAnchor: [18, 46],
+      popupAnchor: [0, -50],
     });
   }
 
@@ -136,9 +141,9 @@ function makeClusterIcon(cluster: PhotoCluster): L.DivIcon {
   return L.divIcon({
     className: "photo-map-marker photo-map-cluster",
     html: `${thumbHtml}<span class="photo-map-count">${countLabel}</span>`,
-    iconSize: [52, 52],
-    iconAnchor: [26, 52],
-    popupAnchor: [0, -56],
+    iconSize: [52, 62],
+    iconAnchor: [26, 62],
+    popupAnchor: [0, -66],
   });
 }
 
@@ -193,31 +198,171 @@ function PhotoPopup({ photo }: { photo: Photo }) {
   );
 }
 
-function ClusterPopup({ cluster }: { cluster: PhotoCluster }) {
-  const lead = cluster.photos.find((p) => p.thumbnail_path);
-  const shown = cluster.photos.slice(0, 5);
-  const extra = cluster.photos.length - shown.length;
-  return (
-    <div className="map-popup">
-      {lead?.thumbnail_path && (
-        <img
-          src={convertFileSrc(lead.thumbnail_path)}
-          className="map-popup-thumb"
-          alt=""
-        />
+// ── ClusterBrowser ─────────────────────────────────────────────────────────────
+
+interface ClusterBrowserProps {
+  cluster: PhotoCluster;
+  onClose: () => void;
+}
+
+/**
+ * Modal that lets the user browse all photos in a cluster.
+ *
+ * - **Grid view**: scrollable thumbnail grid, one card per photo.
+ * - **Lightbox**: click any card to open a full-size view with ‹ / › navigation
+ *   and Escape / arrow-key keyboard support.
+ *
+ * Rendered into `document.body` via a React portal so it sits above the map.
+ */
+function ClusterBrowser({ cluster, onClose }: ClusterBrowserProps) {
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const n = cluster.photos.length;
+
+  // Keyboard navigation
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (lightboxIndex !== null) setLightboxIndex(null);
+        else onClose();
+      } else if (lightboxIndex !== null) {
+        if (e.key === "ArrowLeft")
+          setLightboxIndex((i) => (i !== null ? (i - 1 + n) % n : null));
+        else if (e.key === "ArrowRight")
+          setLightboxIndex((i) => (i !== null ? (i + 1) % n : null));
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [lightboxIndex, onClose, n]);
+
+  const lightboxPhoto =
+    lightboxIndex !== null ? cluster.photos[lightboxIndex] : null;
+
+  const stopPropagation = (e: React.MouseEvent) => e.stopPropagation();
+
+  return createPortal(
+    <>
+      {/* Grid browser overlay */}
+      <div
+        className="cluster-browser-overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${n} photos in this area`}
+        onClick={onClose}
+      >
+        <div className="cluster-browser" onClick={stopPropagation}>
+          <div className="cluster-browser-header">
+            <span className="cluster-browser-title">
+              {n} photo{n !== 1 ? "s" : ""} in this area
+            </span>
+            <button
+              className="cluster-browser-close"
+              onClick={onClose}
+              aria-label="Close"
+            >
+              ✕
+            </button>
+          </div>
+          <div className="cluster-browser-grid">
+            {cluster.photos.map((photo, index) => (
+              <button
+                key={photo.id}
+                className="cluster-browser-cell"
+                onClick={() => setLightboxIndex(index)}
+                title={basename(photo.file_path)}
+              >
+                {photo.thumbnail_path ? (
+                  <img
+                    src={convertFileSrc(photo.thumbnail_path)}
+                    className="cluster-browser-thumb"
+                    alt=""
+                  />
+                ) : (
+                  <span className="cluster-browser-no-thumb" aria-hidden="true">
+                    📷
+                  </span>
+                )}
+                <span className="cluster-browser-caption">
+                  {basename(photo.file_path)}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Lightbox — rendered on top of the grid */}
+      {lightboxPhoto !== null && lightboxIndex !== null && (
+        <div
+          className="cluster-lightbox-overlay"
+          onClick={() => setLightboxIndex(null)}
+        >
+          <div className="cluster-lightbox" onClick={stopPropagation}>
+            <button
+              className="cluster-lightbox-close"
+              onClick={() => setLightboxIndex(null)}
+              aria-label="Back to grid"
+            >
+              ✕
+            </button>
+
+            <div className="cluster-lightbox-body">
+              <button
+                className="cluster-lightbox-prev"
+                onClick={() =>
+                  setLightboxIndex((i) => (i !== null ? (i - 1 + n) % n : null))
+                }
+                aria-label="Previous photo"
+              >
+                ‹
+              </button>
+
+              <div className="cluster-lightbox-media">
+                {lightboxPhoto.thumbnail_path ? (
+                  <img
+                    src={convertFileSrc(lightboxPhoto.thumbnail_path)}
+                    className="cluster-lightbox-img"
+                    alt={basename(lightboxPhoto.file_path)}
+                  />
+                ) : (
+                  <div className="cluster-lightbox-no-thumb">📷</div>
+                )}
+              </div>
+
+              <button
+                className="cluster-lightbox-next"
+                onClick={() =>
+                  setLightboxIndex((i) => (i !== null ? (i + 1) % n : null))
+                }
+                aria-label="Next photo"
+              >
+                ›
+              </button>
+            </div>
+
+            <div className="cluster-lightbox-info">
+              <strong className="cluster-lightbox-name">
+                {basename(lightboxPhoto.file_path)}
+              </strong>
+              <span className="cluster-lightbox-date">
+                {fmtDate(lightboxPhoto.timestamp)}
+              </span>
+              {lightboxPhoto.latitude != null &&
+                lightboxPhoto.longitude != null && (
+                  <span className="cluster-lightbox-gps">
+                    {(lightboxPhoto.latitude as number).toFixed(5)}°,{" "}
+                    {(lightboxPhoto.longitude as number).toFixed(5)}°
+                  </span>
+                )}
+              <span className="cluster-lightbox-counter">
+                {lightboxIndex + 1} / {n}
+              </span>
+            </div>
+          </div>
+        </div>
       )}
-      <strong className="map-popup-name">
-        {cluster.photos.length} photos in this area
-      </strong>
-      <ul className="map-popup-cluster-list">
-        {shown.map((p) => (
-          <li key={p.id}>{basename(p.file_path)}</li>
-        ))}
-        {extra > 0 && (
-          <li className="map-popup-cluster-more">+{extra} more</li>
-        )}
-      </ul>
-    </div>
+    </>,
+    document.body
   );
 }
 
@@ -233,6 +378,9 @@ export function MapView({ isActive }: MapViewProps) {
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedCluster, setSelectedCluster] = useState<PhotoCluster | null>(
+    null
+  );
   const mapRef = useRef<LeafletMap | null>(null);
 
   // Leaflet measures the container on init; if the panel is hidden (display:none)
@@ -314,18 +462,28 @@ export function MapView({ isActive }: MapViewProps) {
               key={cluster.key}
               position={[cluster.lat, cluster.lon]}
               icon={icon}
+              eventHandlers={
+                isCluster
+                  ? { click: () => setSelectedCluster(cluster) }
+                  : undefined
+              }
             >
-              <Popup>
-                {isCluster ? (
-                  <ClusterPopup cluster={cluster} />
-                ) : (
+              {!isCluster && (
+                <Popup>
                   <PhotoPopup photo={cluster.photos[0]} />
-                )}
-              </Popup>
+                </Popup>
+              )}
             </Marker>
           );
         })}
       </MapContainer>
+
+      {selectedCluster && (
+        <ClusterBrowser
+          cluster={selectedCluster}
+          onClose={() => setSelectedCluster(null)}
+        />
+      )}
     </div>
   );
 }
