@@ -19,6 +19,6 @@ pub use db::{
 pub use scanner::{scan_directory, compute_sha256, ScanError, ScanReport, ScanEntryError};
 pub use thumbnail::{
     generate_thumbnail, generate_thumbnails_batch, generate_thumbnail_for_photo,
-    thumbnail_path_for,
-    ThumbnailBatchReport, ThumbnailEntryError, ThumbnailError, MAX_THUMB_RETRIES,
+    count_pending_thumbnails, thumbnail_path_for,
+    ThumbnailBatchReport, ThumbnailEntryError, ThumbnailError, MAX_THUMB_RETRIES, THUMB_SIZE,
 };

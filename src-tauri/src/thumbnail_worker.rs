@@ -30,7 +30,7 @@ use serde::Serialize;
 use tauri::AppHandle;
 use tauri::Emitter;
 
-use photomap_core::generate_thumbnails_batch;
+use photomap_core::{generate_thumbnails_batch, count_pending_thumbnails};
 
 // ── Commands sent *to* the worker ─────────────────────────────────────────────
 
@@ -88,8 +88,37 @@ pub fn thumbnail_worker_loop(
         };
 
         let mut done: u32 = 0;
-        let mut total: u32 = 0;
         let mut cancelled = false;
+
+        // ── Count pending work upfront ────────────────────────────────────────
+        // Knowing the total before the first batch lets the UI show an accurate
+        // progress bar from the start and avoids the "stuck on Starting" symptom
+        // caused by React batching the first thumbnail_progress + thumbnail_done
+        // events when there is only one batch of work.
+        let total: u32 = match count_pending_thumbnails(&conn) {
+            Ok(n) => n,
+            Err(e) => {
+                let _ = app.emit("thumbnail_error", e.to_string());
+                continue;
+            }
+        };
+
+        // ── Short-circuit when there is nothing to do ─────────────────────────
+        if total == 0 {
+            let _ = app.emit("thumbnail_done", ThumbnailDone { done: 0, cancelled: false });
+            continue;
+        }
+
+        // Emit the initial progress so the UI shows the correct total before
+        // any decode work begins.
+        let _ = app.emit(
+            "thumbnail_progress",
+            ThumbnailProgress {
+                done: 0,
+                remaining: total,
+                total,
+            },
+        );
 
         // ── Generation loop ───────────────────────────────────────────────────
         loop {
@@ -117,11 +146,6 @@ pub fn thumbnail_worker_loop(
             };
 
             done += report.processed;
-
-            // Anchor total on the first batch so the progress bar is stable.
-            if total == 0 {
-                total = done + report.remaining;
-            }
 
             let _ = app.emit(
                 "thumbnail_progress",

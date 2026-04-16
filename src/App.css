@@ -1359,6 +1359,12 @@
 
 /* ── Clear all thumbnails section (ScanPanel) ───────────────────────────── */
 
+.thumb-nothing-msg {
+  margin: 0.5rem 0 0;
+  font-size: 0.875rem;
+  color: #6c757d;
+}
+
 .thumb-clear-section {
   display: flex;
   align-items: center;

@@ -2,9 +2,11 @@
 //!
 //! # Overview
 //!
-//! [`generate_thumbnail`] resizes a single image to fit within a
-//! 300 × 300 pixel bounding box (preserving aspect ratio) and writes the
-//! result as a JPEG to the supplied output path.
+//! [`generate_thumbnail`] resizes a single image to exactly [`THUMB_SIZE`] ×
+//! [`THUMB_SIZE`] pixels using a fill-then-center-crop strategy (the image is
+//! scaled so the shorter edge reaches [`THUMB_SIZE`], then the longer edge is
+//! center-cropped).  The result is written as a JPEG to the supplied output
+//! path.
 //!
 //! Standard formats (JPEG, PNG, TIFF, WebP) are handled by the `image`
 //! crate.  `.heic` and `.heif` files are decoded by the `heic` crate via
@@ -43,8 +45,12 @@ use crate::db::photos::DbError;
 // Constants
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Thumbnail dimensions: the long edge is capped at this many pixels.
-const MAX_SIDE: u32 = 300;
+/// Side length of every generated thumbnail in pixels.
+///
+/// All thumbnails are exactly [`THUMB_SIZE`] × [`THUMB_SIZE`] square: the
+/// source image is scaled so its shorter edge reaches this size, then the
+/// longer edge is center-cropped to match.
+pub const THUMB_SIZE: u32 = 300;
 
 /// JPEG encoding quality (0–100).
 const JPEG_QUALITY: u8 = 80;
@@ -113,8 +119,10 @@ pub struct ThumbnailBatchReport {
 /// Dispatches to [`decode_heic`] for `.heic` / `.heif` files and falls back
 /// to the `image` crate for everything else.
 ///
-/// The image is resized to fit within [`MAX_SIDE`] × [`MAX_SIDE`] pixels using
-/// Lanczos3 resampling, then encoded as JPEG at [`JPEG_QUALITY`].
+/// The image is scaled so that its shorter edge equals [`THUMB_SIZE`] pixels
+/// (using Triangle resampling) and then center-cropped to produce an exact
+/// [`THUMB_SIZE`] × [`THUMB_SIZE`] square.  The result is encoded as JPEG at
+/// [`JPEG_QUALITY`].
 ///
 /// # Errors
 /// Returns [`ThumbnailError::HeicDecode`] for HEIC/HEIF decode failures,
@@ -122,42 +130,6 @@ pub struct ThumbnailBatchReport {
 /// [`ThumbnailError::Io`] if the output file cannot be written.
 pub fn generate_thumbnail(source: &Path, out_path: &Path) -> Result<(), ThumbnailError> {
     println!("generate_thumbnail: start source={} out={}", source.display(), out_path.display());
-
-    // Fast-path on macOS: use the system `sips` tool to decode & scale HEIC/HEIF
-    // directly to a JPEG thumbnail. This avoids a full in-process HEIC decode
-    // of large images and is much faster and more memory-efficient.
-    let ext = source
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-
-    #[cfg(target_os = "macos")]
-    if ext == "heic" || ext == "heif" {
-        use std::process::Command;
-        let out = Command::new("sips")
-            .arg("-Z")
-            .arg(format!("{}", MAX_SIDE))
-            .arg("-s")
-            .arg("format")
-            .arg("jpeg")
-            .arg("-s")
-            .arg("formatOptions")
-            .arg(format!("{}", JPEG_QUALITY))
-            .arg("--out")
-            .arg(out_path)
-            .arg(source)
-            .output()
-            .map_err(ThumbnailError::Io)?;
-
-        if out.status.success() {
-            println!("generate_thumbnail: sips fast-path succeeded for {}", source.display());
-            return Ok(());
-        } else {
-            println!("generate_thumbnail: sips failed: {}", String::from_utf8_lossy(&out.stderr));
-            // fallthrough to in-process decode
-        }
-    }
 
     let img = open_image(source)?;
     write_thumbnail(img, out_path)
@@ -336,6 +308,30 @@ pub fn generate_thumbnail_for_photo(
     Ok(path_str)
 }
 
+/// Return the number of photos that still need a thumbnail and have not yet
+/// exhausted their retry budget.
+///
+/// This is equivalent to the `remaining` value returned by
+/// [`generate_thumbnails_batch`] but does not process any photos, making it
+/// cheap to call before starting the generation loop so the UI can show an
+/// accurate total from the very beginning.
+///
+/// # Errors
+/// Returns [`ThumbnailError::Database`] on a SQLite error.
+pub fn count_pending_thumbnails(conn: &Connection) -> Result<u32, ThumbnailError> {
+    let count: u32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM photos
+             WHERE  thumbnail_path IS NULL
+               AND  thumbnail_needs_review = 0
+               AND  thumbnail_retry_count < ?1",
+            rusqlite::params![MAX_THUMB_RETRIES],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    Ok(count)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
@@ -418,12 +414,17 @@ fn decode_heic(source: &Path) -> Result<image::DynamicImage, ThumbnailError> {
     Ok(image::DynamicImage::ImageRgb8(rgb))
 }
 
-/// Resize `img` to fit within [`MAX_SIDE`] × [`MAX_SIDE`] and encode it as a
+/// Scale `img` to exactly [`THUMB_SIZE`] × [`THUMB_SIZE`] and encode it as a
 /// JPEG at [`JPEG_QUALITY`] to `out_path`.
+///
+/// Uses [`image::DynamicImage::resize_to_fill`] with Triangle resampling: the
+/// image is scaled so the shorter edge reaches [`THUMB_SIZE`], then the longer
+/// edge is center-cropped, guaranteeing every thumbnail is the same square
+/// dimensions.
 fn write_thumbnail(img: image::DynamicImage, out_path: &Path) -> Result<(), ThumbnailError> {
     println!("write_thumbnail: start out={}", out_path.display());
     let t_resize_start = Instant::now();
-    let thumbnail = img.resize(MAX_SIDE, MAX_SIDE, FilterType::Triangle);
+    let thumbnail = img.resize_to_fill(THUMB_SIZE, THUMB_SIZE, FilterType::Triangle);
     let t_resize = t_resize_start.elapsed();
     println!("write_thumbnail: resized to {}x{} ({} ms)", thumbnail.width(), thumbnail.height(), t_resize.as_millis());
 
@@ -518,8 +519,8 @@ mod tests {
         generate_thumbnail(&path, &out).unwrap();
 
         let result = image::open(&out).unwrap();
-        assert!(result.width() <= MAX_SIDE, "width should be ≤ {MAX_SIDE}");
-        assert!(result.height() <= MAX_SIDE, "height should be ≤ {MAX_SIDE}");
+        assert_eq!(result.width(), THUMB_SIZE, "thumbnail width should be exactly {THUMB_SIZE}");
+        assert_eq!(result.height(), THUMB_SIZE, "thumbnail height should be exactly {THUMB_SIZE}");
     }
 
     // ── batch ────────────────────────────────────────────────────────────────

@@ -279,6 +279,10 @@ export function ScanPanel() {
           </div>
         )}
 
+        {!thumbRunning && thumbStatus === "Nothing to generate" && (
+          <p className="thumb-nothing-msg">All photos already have thumbnails.</p>
+        )}
+
         <div className="thumb-clear-section">
           <button
             className="thumb-clear-button"

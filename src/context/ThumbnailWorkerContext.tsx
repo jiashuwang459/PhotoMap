@@ -110,8 +110,15 @@ export function ThumbnailWorkerProvider({
 
       unlisteners.push(
         await listen<ThumbnailDonePayload>("thumbnail_done", (event) => {
-          setDone(event.payload.done);
-          setStatus(event.payload.cancelled ? "Cancelled" : "Done");
+          const { done, cancelled } = event.payload;
+          setDone(done);
+          setStatus(
+            cancelled
+              ? "Cancelled"
+              : done === 0
+              ? "Nothing to generate"
+              : "Done"
+          );
           setIsRunning(false);
           setRefreshKey((k) => k + 1);
         })
