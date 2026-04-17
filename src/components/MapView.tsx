@@ -930,6 +930,15 @@ export function MapView({ isActive }: MapViewProps) {
    * Used to auto-unfocus when the user zooms back out past that level.
    */
   const focusZoomRef = useRef<number | null>(null);
+  /**
+   * Set to `true` after calling `fitBounds` to focus a trip.
+   * The next `zoomend`/`moveend` will record the post-animation zoom into
+   * `focusZoomRef` instead of checking the unfocus condition, ensuring the
+   * threshold is always based on the actual zoom level reached after the
+   * animation rather than the zoom before it started (which can cause
+   * immediate unfocus for small trips or when already at a high zoom).
+   */
+  const pendingFocusZoomRef = useRef(false);
   /** True once trip data has been fetched (avoid re-fetching on tab switch). */
   const tripsLoadedRef = useRef(false);
 
@@ -944,6 +953,7 @@ export function MapView({ isActive }: MapViewProps) {
     if (mapMode !== "trips") {
       setFocusedTrip(null);
       focusZoomRef.current = null;
+      pendingFocusZoomRef.current = false;
     }
   }, [mapMode]);
 
@@ -1013,12 +1023,20 @@ export function MapView({ isActive }: MapViewProps) {
       setZoom(newZoom);
       setViewportVersion((v) => v + 1);
 
-      // Auto-unfocus a focused trip when the user zooms out past the zoom level
-      // that was active when they focused it.
-      if (
+      if (pendingFocusZoomRef.current) {
+        // The fitBounds animation for a trip focus just completed.  Record the
+        // actual post-animation zoom as the unfocus threshold so that the user
+        // needs to zoom below this level (not below the pre-animation level) to
+        // trigger an auto-unfocus.  This prevents immediately unfocusing small
+        // trips when the user was already at a high zoom before clicking.
+        focusZoomRef.current = newZoom;
+        pendingFocusZoomRef.current = false;
+      } else if (
         focusZoomRef.current !== null &&
         newZoom < focusZoomRef.current
       ) {
+        // Auto-unfocus a focused trip when the user zooms out past the zoom
+        // level that was active when they focused it.
         setFocusedTrip(null);
         focusZoomRef.current = null;
       }
@@ -1076,26 +1094,6 @@ export function MapView({ isActive }: MapViewProps) {
   }, [focusedTripClusters, viewportVersion, useCollisionFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
-   * Clicking a multi-trip cluster zooms into the combined bounding box.
-   * Clicking a single-trip cluster focuses that trip.
-   */
-  const handleTripClusterClick = useCallback((tc: TripCluster) => {
-    if (tc.trips.length === 1) {
-      handleTripPolygonClick(tc.trips[0]);
-      return;
-    }
-    const allLats = tc.trips.flatMap((t) => [t.bounds.minLat, t.bounds.maxLat]);
-    const allLons = tc.trips.flatMap((t) => [t.bounds.minLon, t.bounds.maxLon]);
-    mapRef.current?.fitBounds(
-      [
-        [Math.min(...allLats), Math.min(...allLons)],
-        [Math.max(...allLats), Math.max(...allLons)],
-      ],
-      { padding: [40, 40], maxZoom: 13, animate: true }
-    );
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  /**
    * Click handler for trip polygons.
    *
    * First click on any trip: fit bounds to show the whole polygon comfortably
@@ -1114,20 +1112,54 @@ export function MapView({ isActive }: MapViewProps) {
         setSelectedTrip(td);
       } else {
         // Focus the trip and fit the map to its bounding box.
-        // Record the current zoom so we can auto-unfocus on zoom-out.
-        focusZoomRef.current = zoom;
+        // Set the pending flag so handleViewportChange records the
+        // post-animation zoom as the unfocus threshold, rather than the
+        // pre-animation zoom which can be higher than the destination zoom
+        // and causes immediate unfocus on the first scroll.
+        pendingFocusZoomRef.current = true;
         setFocusedTrip(td);
+
+        // Guard against a degenerate zero-area bbox (e.g. a single-photo
+        // trip where all photos share the same coordinates).  Leaflet's
+        // fitBounds behaves erratically on a point-sized bounds, so expand
+        // it by a small delta before calling fitBounds.
+        const DELTA = 0.001; // ~111 m, invisible at street level
+        const minLat = Math.min(td.bounds.minLat, td.bounds.maxLat - DELTA);
+        const maxLat = Math.max(td.bounds.maxLat, td.bounds.minLat + DELTA);
+        const minLon = Math.min(td.bounds.minLon, td.bounds.maxLon - DELTA);
+        const maxLon = Math.max(td.bounds.maxLon, td.bounds.minLon + DELTA);
+
         mapRef.current?.fitBounds(
           [
-            [td.bounds.minLat, td.bounds.minLon],
-            [td.bounds.maxLat, td.bounds.maxLon],
+            [minLat, minLon],
+            [maxLat, maxLon],
           ],
           { padding: [40, 40], maxZoom: 14, animate: true }
         );
       }
     },
-    [focusedTrip, zoom]
+    [focusedTrip]
   );
+
+  /**
+   * Clicking a multi-trip cluster zooms into the combined bounding box.
+   * Clicking a single-trip cluster focuses that trip.
+   */
+  const handleTripClusterClick = useCallback((tc: TripCluster) => {
+    if (tc.trips.length === 1) {
+      handleTripPolygonClick(tc.trips[0]);
+      return;
+    }
+    const allLats = tc.trips.flatMap((t) => [t.bounds.minLat, t.bounds.maxLat]);
+    const allLons = tc.trips.flatMap((t) => [t.bounds.minLon, t.bounds.maxLon]);
+    mapRef.current?.fitBounds(
+      [
+        [Math.min(...allLats), Math.min(...allLons)],
+        [Math.max(...allLats), Math.max(...allLons)],
+      ],
+      { padding: [40, 40], maxZoom: 13, animate: true }
+    );
+  }, [handleTripPolygonClick]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="map-view">
