@@ -20,6 +20,7 @@ import {
   renameTrip,
   setHomeLocation as apiSetHomeLocation,
   setPhotoTrip,
+  setTripCoverPhoto,
   suggestPhotosForTrips,
 } from "../api/photos";
 import { PhotoCard } from "./PhotoCard";
@@ -180,6 +181,8 @@ function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps)
   const [geocoding, setGeocoding] = useState(false);
   const [viewMode, setViewMode] = useState<TripDetailView>("grid");
   const [savingName, setSavingName] = useState(false);
+  const [coverPhotoId, setCoverPhotoId] = useState<number | null>(trip.cover_photo_id ?? null);
+  const [settingCover, setSettingCover] = useState(false);
 
   const loadPage = useCallback(
     async (pageOffset: number, existing: Photo[]) => {
@@ -240,12 +243,30 @@ function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps)
   async function handleRemovePhoto(photoId: number) {
     try {
       await setPhotoTrip(photoId, null);
+      // If the removed photo was the cover, clear it.
+      if (photoId === coverPhotoId) {
+        await setTripCoverPhoto(trip.id, null);
+        setCoverPhotoId(null);
+      }
       setPhotos((prev) => prev.filter((p) => p.id !== photoId));
       // Refresh trip metadata (dates, photo count) from the DB.
       const updated = await getTrip(trip.id);
       if (updated) onTripChanged(updated);
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  async function handleSetCoverPhoto(photoId: number) {
+    setSettingCover(true);
+    try {
+      const newCover = photoId === coverPhotoId ? null : photoId;
+      await setTripCoverPhoto(trip.id, newCover);
+      setCoverPhotoId(newCover);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSettingCover(false);
     }
   }
 
@@ -462,8 +483,22 @@ function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps)
       {viewMode === "grid" && (
         <div className="photo-grid trip-photo-grid">
           {photos.map((p) => (
-            <div key={p.id} className="trip-photo-item">
+            <div
+              key={p.id}
+              className={`trip-photo-item${p.id === coverPhotoId ? " trip-photo-item--cover" : ""}`}
+            >
               <PhotoCard photo={p} />
+              {p.id === coverPhotoId && (
+                <span className="trip-cover-badge" title="Cover photo">★</span>
+              )}
+              <button
+                className="trip-cover-btn"
+                onClick={() => handleSetCoverPhoto(p.id)}
+                disabled={settingCover}
+                title={p.id === coverPhotoId ? "Clear cover photo" : "Set as cover photo"}
+              >
+                {p.id === coverPhotoId ? "★" : "☆"}
+              </button>
               <button
                 className="trip-photo-remove"
                 onClick={() => handleRemovePhoto(p.id)}
@@ -480,7 +515,7 @@ function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps)
       {viewMode === "list" && (
         <div className="trip-photo-list">
           {photos.map((p) => (
-            <div key={p.id} className="trip-photo-list-row">
+            <div key={p.id} className={`trip-photo-list-row${p.id === coverPhotoId ? " trip-photo-list-row--cover" : ""}`}>
               <div className="trip-photo-list-thumb">
                 {p.thumbnail_path ? (
                   <img
@@ -514,6 +549,14 @@ function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps)
                   </span>
                 )}
               </div>
+              <button
+                className={`btn-ghost trip-cover-list-btn${p.id === coverPhotoId ? " trip-cover-list-btn--active" : ""}`}
+                onClick={() => handleSetCoverPhoto(p.id)}
+                disabled={settingCover}
+                title={p.id === coverPhotoId ? "Clear cover photo" : "Set as cover photo"}
+              >
+                {p.id === coverPhotoId ? "★" : "☆"}
+              </button>
               <button
                 className="btn-ghost trip-photo-list-remove"
                 onClick={() => handleRemovePhoto(p.id)}
@@ -657,6 +700,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
   const [geoSplitKm, setGeoSplitKm] = useState(500);
   const [homeDensityMultiplier, setHomeDensityMultiplier] = useState(3.0);
   const [minPhotos, setMinPhotos] = useState(1);
+  const [enableGeocoding, setEnableGeocoding] = useState(true);
   const [showGroupParams, setShowGroupParams] = useState(false);
 
   // Home location state
@@ -850,7 +894,8 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
     setGrouping(false);
 
     // ── Location-based naming via Nominatim ────────────────────────────────
-    // Only geocode trips that have a centroid; rate-limit to ≤ 1 req/s.
+    // Only geocode when the user has enabled it, and only trips with a centroid.
+    if (!enableGeocoding) return;
     const withGps = results.filter(
       (r) => r.centroid_lat !== null && r.centroid_lon !== null
     );
@@ -1157,6 +1202,24 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
                 Clusters with fewer photos than this are discarded as noise
                 (isolated snapshots, accidental captures). Set to 1 to keep
                 every single-photo trip.
+              </p>
+            </div>
+
+            <div className="trips-param-row">
+              <label className="trips-toggle-label">
+                <input
+                  type="checkbox"
+                  checked={enableGeocoding}
+                  onChange={(e) => setEnableGeocoding(e.target.checked)}
+                  className="trips-toggle-checkbox"
+                />
+                <span className="trips-param-label-text">Auto-geocode after grouping</span>
+              </label>
+              <p className="trips-param-hint">
+                When enabled, newly created trips are automatically renamed
+                to their location using Nominatim (requires internet access,
+                rate-limited to 1 request/s). Disable to skip naming — you
+                can always geocode individual trips manually later.
               </p>
             </div>
           </div>

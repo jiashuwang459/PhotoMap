@@ -889,6 +889,55 @@
   position: relative;
 }
 
+.trip-photo-item--cover {
+  outline: 2.5px solid #f5a623;
+  border-radius: 6px;
+}
+
+.trip-cover-badge {
+  position: absolute;
+  top: 0.3rem;
+  left: 0.35rem;
+  background: rgba(245, 166, 35, 0.9);
+  color: #fff;
+  border-radius: 50%;
+  width: 1.35rem;
+  height: 1.35rem;
+  font-size: 0.78rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.trip-cover-btn {
+  position: absolute;
+  bottom: 0.35rem;
+  left: 0.35rem;
+  background: rgba(255, 255, 255, 0.85);
+  color: #888;
+  border: none;
+  border-radius: 50%;
+  width: 1.5rem;
+  height: 1.5rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.1s;
+}
+
+.trip-photo-item:hover .trip-cover-btn {
+  opacity: 1;
+}
+
+.trip-photo-item--cover .trip-cover-btn {
+  opacity: 1;
+  color: #f5a623;
+}
+
 .trip-photo-remove {
   position: absolute;
   top: 0.35rem;
@@ -910,6 +959,49 @@
 
 .trip-photo-item:hover .trip-photo-remove {
   opacity: 1;
+}
+
+/* ── Cover star in list view ─────────────────────────────────────────────── */
+
+.trip-photo-list-row--cover {
+  background: #fff9ed;
+  border-color: #f5a623 !important;
+}
+
+.trip-cover-list-btn {
+  font-size: 1rem;
+  color: #ccc;
+  padding: 0.15rem 0.3rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.1s;
+}
+
+.trip-cover-list-btn--active {
+  color: #f5a623;
+}
+
+.trip-cover-list-btn:hover:not(:disabled) {
+  color: #f5a623;
+}
+
+/* ── Geocoding toggle ────────────────────────────────────────────────────── */
+
+.trips-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-size: 0.88rem;
+  margin-bottom: 0.2rem;
+}
+
+.trips-toggle-checkbox {
+  width: 1rem;
+  height: 1rem;
+  accent-color: #1a1a2e;
+  cursor: pointer;
 }
 
 /* ── Trip detail: view mode toggle ──────────────────────────────────────── */
@@ -1658,39 +1750,76 @@
   align-items: center;
 }
 
-.trip-map-pin-badge {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
+.trip-map-pin-img {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 8px;
   border: 3px solid #fff;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.4);
+  display: block;
+}
+
+.trip-map-pin-img--placeholder {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1.3rem;
-  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
-  line-height: 1;
+  font-size: 1.6rem;
+  border-radius: 8px;
 }
 
-.trip-map-pin-badge--cluster {
-  font-size: 1rem;
-  font-weight: 700;
-  color: #fff;
+.trip-map-pin-img--cluster {
   background: #607d8b;
+  color: #fff;
+  font-size: 1.4rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
 }
 
 .trip-map-pin-label {
-  margin-bottom: 2px;
-  background: rgba(255, 255, 255, 0.92);
-  border-radius: 3px;
-  padding: 1px 5px;
-  font-size: 0.68rem;
+  margin-top: 3px;
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 0.7rem;
   font-weight: 600;
+  text-align: center;
   white-space: nowrap;
-  max-width: 90px;
+  max-width: 96px;
   overflow: hidden;
   text-overflow: ellipsis;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.22);
   color: #1a1a2e;
+  border-bottom: 2.5px solid transparent;
+}
+
+.trip-map-pin-label--cluster {
+  border-bottom-color: #607d8b;
+}
+
+/* ── Home markers ────────────────────────────────────────────────────────── */
+
+.photo-map-marker--home {
+  background: transparent !important;
+  border: none !important;
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.35));
+}
+
+.photo-map-marker--home-old {
+  opacity: 0.55;
+}
+
+.photo-map-home-icon {
+  font-size: 2rem;
+  line-height: 1;
+  display: block;
+}
+
+.photo-map-home-icon--old {
+  filter: grayscale(60%);
 }
 
 /* ── Grouping parameters panel ──────────────────────────────────────────────── */

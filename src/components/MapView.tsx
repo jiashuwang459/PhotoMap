@@ -15,13 +15,15 @@ import { listen } from "@tauri-apps/api/event";
 import type { Map as LeafletMap, LatLngBounds } from "leaflet";
 import {
   getPhotoByPath,
+  getPhotoById,
   listTrips,
   queryByBoundingBox,
   queryPhotosByTrip,
   startThumbnailWorker,
   getHomeLocation,
+  listHomeTransitions,
 } from "../api/photos";
-import type { BoundingBox, HomeLocation, Page, Photo, Trip } from "../api/types";
+import type { BoundingBox, HomeLocation, HomeTransition, Page, Photo, Trip } from "../api/types";
 
 // ── constants ────────────────────────────────────────────────────────────────
 
@@ -118,6 +120,8 @@ interface TripData {
   hull: [number, number][];
   /** CSS colour string from TRIP_COLORS palette. */
   color: string;
+  /** Tauri file-src URL for the cover photo thumbnail, if any. */
+  coverThumbnailSrc: string | null;
 }
 
 // ── Clustering ───────────────────────────────────────────────────────────────
@@ -342,6 +346,41 @@ function convexHull(points: [number, number][]): [number, number][] {
   return [...lower, ...upper];
 }
 
+/**
+ * Compute the polygon centroid (area-weighted) of a convex hull.
+ * For degenerate hulls with fewer than 3 points, falls back to the
+ * arithmetic mean of the hull vertices so the pin is always equidistant
+ * from the polygon boundary rather than sitting at the bbox midpoint.
+ */
+function hullCentroid(hull: [number, number][]): [number, number] {
+  const n = hull.length;
+  if (n === 0) return [0, 0];
+  if (n === 1) return [hull[0][0], hull[0][1]];
+  if (n === 2)
+    return [(hull[0][0] + hull[1][0]) / 2, (hull[0][1] + hull[1][1]) / 2];
+
+  // Shoelace-based polygon centroid
+  let area = 0;
+  let cLat = 0;
+  let cLon = 0;
+  for (let i = 0; i < n; i++) {
+    const [x0, y0] = hull[i];
+    const [x1, y1] = hull[(i + 1) % n];
+    const cross = x0 * y1 - x1 * y0;
+    area += cross;
+    cLat += (x0 + x1) * cross;
+    cLon += (y0 + y1) * cross;
+  }
+  area /= 2;
+  if (Math.abs(area) < 1e-12) {
+    // Degenerate (collinear): fall back to vertex mean
+    const sumLat = hull.reduce((s, p) => s + p[0], 0);
+    const sumLon = hull.reduce((s, p) => s + p[1], 0);
+    return [sumLat / n, sumLon / n];
+  }
+  return [cLat / (6 * area), cLon / (6 * area)];
+}
+
 // ── Icon factories ───────────────────────────────────────────────────────────
 
 function makeClusterIcon(cluster: PhotoCluster): L.DivIcon {
@@ -382,20 +421,24 @@ function makeClusterIcon(cluster: PhotoCluster): L.DivIcon {
   });
 }
 
+/** Pin width in pixels. */
+const TRIP_PIN_W = 96;
+const TRIP_PIN_THUMB = 64;
+const TRIP_PIN_H = TRIP_PIN_THUMB + 22; // thumbnail + label strip
+
 function makeTripIcon(td: TripData): L.DivIcon {
-  const label =
-    td.trip.name.length > 16
-      ? td.trip.name.slice(0, 16) + "…"
-      : td.trip.name;
+  const imgHtml = td.coverThumbnailSrc
+    ? `<img src="${td.coverThumbnailSrc}" class="trip-map-pin-img" alt="" />`
+    : `<div class="trip-map-pin-img trip-map-pin-img--placeholder" style="background:${td.color}">✈️</div>`;
   return L.divIcon({
     className: "trip-map-pin",
     html: `
-      <span class="trip-map-pin-label">${label}</span>
-      <div class="trip-map-pin-badge" style="background:${td.color}">✈️</div>
+      ${imgHtml}
+      <div class="trip-map-pin-label" style="border-color:${td.color}">${td.trip.name}</div>
     `,
-    iconSize: [90, 62],
-    iconAnchor: [45, 62],
-    popupAnchor: [0, -70],
+    iconSize: [TRIP_PIN_W, TRIP_PIN_H],
+    iconAnchor: [TRIP_PIN_W / 2, TRIP_PIN_H],
+    popupAnchor: [0, -(TRIP_PIN_H + 4)],
   });
 }
 
@@ -405,20 +448,22 @@ function makeTripClusterIcon(tc: TripCluster): L.DivIcon {
   return L.divIcon({
     className: "trip-map-pin",
     html: `
-      <span class="trip-map-pin-label">${count} trips</span>
-      <div class="trip-map-pin-badge trip-map-pin-badge--cluster">${count}</div>
+      <div class="trip-map-pin-img trip-map-pin-img--cluster">${count}</div>
+      <div class="trip-map-pin-label trip-map-pin-label--cluster">${count} trips</div>
     `,
-    iconSize: [90, 62],
-    iconAnchor: [45, 62],
+    iconSize: [TRIP_PIN_W, TRIP_PIN_H],
+    iconAnchor: [TRIP_PIN_W / 2, TRIP_PIN_H],
     popupAnchor: [0, -70],
   });
 }
 
-/** Marker icon for the inferred home base location. */
-function makeHomeMarkerIcon(): L.DivIcon {
+/** Marker icon for the current home location. */
+function makeHomeMarkerIcon(isCurrent: boolean): L.DivIcon {
   return L.divIcon({
-    className: "photo-map-marker photo-map-marker--home",
-    html: `<span class="photo-map-home-icon" aria-label="Home">🏠</span>`,
+    className: `photo-map-marker photo-map-marker--home${isCurrent ? "" : " photo-map-marker--home-old"}`,
+    html: isCurrent
+      ? `<span class="photo-map-home-icon" aria-label="Current home">🏠</span>`
+      : `<span class="photo-map-home-icon photo-map-home-icon--old" aria-label="Previous home">🏚️</span>`,
     iconSize: [40, 40],
     iconAnchor: [20, 40],
     popupAnchor: [0, -44],
@@ -946,12 +991,36 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
 
   const mapRef = useRef<LeafletMap | null>(null);
 
-  // ── Home location ─────────────────────────────────────────────────────────
+  // ── Home location + transitions ───────────────────────────────────────────
   const [homeLocation, setHomeLocation] = useState<HomeLocation | null>(null);
+  const [homeTransitions, setHomeTransitions] = useState<HomeTransition[]>([]);
+  /** Whether to show home markers at all. */
+  const [showHomes, setShowHomes] = useState(true);
+  /** When true, only the current home is shown; when false, all homes shown. */
+  const [showCurrentHomeOnly, setShowCurrentHomeOnly] = useState(false);
 
   useEffect(() => {
     getHomeLocation().then(setHomeLocation).catch(() => {});
+    listHomeTransitions().then(setHomeTransitions).catch(() => {});
   }, []);
+
+  /** The most-recent confirmed home transition (= current home). */
+  const currentHomeTransition = homeTransitions
+    .filter((t) => t.is_confirmed)
+    .sort((a, b) => b.transition_ts - a.transition_ts)[0] ?? null;
+
+  /**
+   * Pan the map to the current home location.
+   * Uses the stored homeLocation or falls back to the most-recent transition.
+   */
+  const handleGoHome = useCallback(() => {
+    const target = homeLocation
+      ?? (currentHomeTransition
+          ? { lat: currentHomeTransition.new_lat, lon: currentHomeTransition.new_lon }
+          : null);
+    if (!target) return;
+    mapRef.current?.flyTo([target.lat, target.lon], 11, { animate: true });
+  }, [homeLocation, currentHomeTransition]);
 
   useEffect(() => {
     if (isActive) mapRef.current?.invalidateSize();
@@ -999,26 +1068,44 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
 
             const lats = geoPhotos.map((p) => p.latitude!);
             const lons = geoPhotos.map((p) => p.longitude!);
+            const hullPts: [number, number][] = geoPhotos.map((p) => [
+              p.latitude!,
+              p.longitude!,
+            ]);
+            const hull = convexHull(hullPts);
+            // Use the polygon centroid of the convex hull so the pin is
+            // equidistant from the hull boundary rather than biased toward
+            // densely-photographed corners.
+            const [centLat, centLon] = hullCentroid(hull);
             const bounds: TripBounds = {
               minLat: Math.min(...lats),
               maxLat: Math.max(...lats),
               minLon: Math.min(...lons),
               maxLon: Math.max(...lons),
-              // Use the bounding-box midpoint as the polygon centre so the
-              // pin sits in the visual middle of the hull regardless of photo density.
-              centLat: (Math.min(...lats) + Math.max(...lats)) / 2,
-              centLon: (Math.min(...lons) + Math.max(...lons)) / 2,
+              centLat,
+              centLon,
             };
-            const hullPts: [number, number][] = geoPhotos.map((p) => [
-              p.latitude!,
-              p.longitude!,
-            ]);
+
+            // Load cover photo thumbnail if the trip has one.
+            let coverThumbnailSrc: string | null = null;
+            if (trip.cover_photo_id !== null) {
+              try {
+                const coverPhoto = await getPhotoById(trip.cover_photo_id);
+                if (coverPhoto?.thumbnail_path) {
+                  coverThumbnailSrc = convertFileSrc(coverPhoto.thumbnail_path);
+                }
+              } catch {
+                // thumbnail missing — fall back to ✈️
+              }
+            }
+
             return {
               trip,
               photos: geoPhotos,
               bounds,
-              hull: convexHull(hullPts),
+              hull,
               color: TRIP_COLORS[idx % TRIP_COLORS.length],
+              coverThumbnailSrc,
             };
           })
         );
@@ -1201,9 +1288,11 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
     );
   }, []);
 
+  const hasHome = homeLocation !== null || currentHomeTransition !== null;
+
   return (
     <div className="map-view">
-      {/* Mode toggle + collision filter toggle */}
+      {/* Mode toggle + home controls + collision filter toggle */}
       <div className="map-mode-toggle">
         <button
           className={`map-mode-btn${mapMode === "photos" ? " active" : ""}`}
@@ -1218,6 +1307,38 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
           ✈️ Trips
         </button>
         <div className="map-mode-divider" />
+        {/* ── Home controls ── */}
+        {hasHome && (
+          <>
+            <button
+              className={`map-mode-btn map-mode-btn--icon${showHomes ? " active" : ""}`}
+              onClick={() => setShowHomes((v) => !v)}
+              title={showHomes ? "Hide home markers" : "Show home markers"}
+              aria-pressed={showHomes}
+            >
+              🏠
+            </button>
+            {showHomes && homeTransitions.filter((t) => t.is_confirmed).length > 1 && (
+              <button
+                className={`map-mode-btn map-mode-btn--icon${showCurrentHomeOnly ? " active" : ""}`}
+                onClick={() => setShowCurrentHomeOnly((v) => !v)}
+                title={showCurrentHomeOnly ? "Showing current home only — click to show all" : "Showing all homes — click to show current only"}
+                aria-pressed={showCurrentHomeOnly}
+              >
+                1️⃣
+              </button>
+            )}
+            <button
+              className="map-mode-btn map-mode-btn--icon"
+              onClick={handleGoHome}
+              title="Go to current home"
+              disabled={!hasHome}
+            >
+              ⌂
+            </button>
+            <div className="map-mode-divider" />
+          </>
+        )}
         <button
           className={`map-mode-btn map-mode-btn--icon${useCollisionFilter ? " active" : ""}`}
           onClick={() => setUseCollisionFilter((v) => !v)}
@@ -1392,18 +1513,54 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
           <JumpToTrip tripDataList={tripDataList} onSelect={handleFocusTrip} />
         )}
 
-        {/* Home location marker — shown in both modes when a home is set */}
-        {homeLocation && (
-          <Marker
-            position={[homeLocation.lat, homeLocation.lon]}
-            icon={makeHomeMarkerIcon()}
-            zIndexOffset={1000}
-          >
-            <Tooltip permanent={false} direction="top" offset={[0, -44]}>
-              Home
-            </Tooltip>
-          </Marker>
-        )}
+        {/* ── Home markers ─────────────────────────────────────────────────── */}
+        {/* Confirmed home transition markers */}
+        {showHomes &&
+          homeTransitions
+            .filter((t) => t.is_confirmed)
+            .filter((t, _i, arr) => {
+              if (!showCurrentHomeOnly) return true;
+              // Only the most-recent confirmed transition
+              const latest = arr.reduce((best, c) =>
+                c.transition_ts > best.transition_ts ? c : best
+              );
+              return t.id === latest.id;
+            })
+            .map((t) => {
+              const isLatest =
+                t.id === currentHomeTransition?.id;
+              const dateStr = new Date(t.transition_ts * 1000).toLocaleDateString(
+                undefined,
+                { year: "numeric", month: "short", timeZone: "UTC" }
+              );
+              return (
+                <Marker
+                  key={`home-t-${t.id}`}
+                  position={[t.new_lat, t.new_lon]}
+                  icon={makeHomeMarkerIcon(isLatest)}
+                  zIndexOffset={isLatest ? 1200 : 900}
+                >
+                  <Tooltip permanent={false} direction="top" offset={[0, -44]}>
+                    {isLatest ? "Current home" : `Former home (since ${dateStr})`}
+                  </Tooltip>
+                </Marker>
+              );
+            })}
+
+        {/* Fallback: plain homeLocation with no transition history */}
+        {showHomes &&
+          homeLocation &&
+          homeTransitions.filter((t) => t.is_confirmed).length === 0 && (
+            <Marker
+              position={[homeLocation.lat, homeLocation.lon]}
+              icon={makeHomeMarkerIcon(true)}
+              zIndexOffset={1200}
+            >
+              <Tooltip permanent={false} direction="top" offset={[0, -44]}>
+                Home
+              </Tooltip>
+            </Marker>
+          )}
 
         {/* Zoom slider — replaces the default Leaflet zoom control */}
         <ZoomSlider />

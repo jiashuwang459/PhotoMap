@@ -15,7 +15,7 @@ pub use photos::{
 
 pub use trips::{
     create_trip, list_trips, get_trip, delete_trip,
-    confirm_trip, rename_trip, set_photo_trip,
+    confirm_trip, rename_trip, set_photo_trip, set_trip_cover_photo,
     query_photos_by_trip, query_untripped_photos, auto_group_trips,
     delete_all_suggested_trips,
     suggest_photos_for_trips,

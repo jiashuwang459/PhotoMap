@@ -88,6 +88,13 @@ export async function getPhotoByPath(filePath: string): Promise<Photo | null> {
   return invoke<Photo | null>("cmd_get_photo_by_path", { filePath });
 }
 
+/**
+ * Return a single photo by its database id, or `null` if not found.
+ */
+export async function getPhotoById(photoId: number): Promise<Photo | null> {
+  return invoke<Photo | null>("cmd_get_photo_by_id", { photoId });
+}
+
 // ── Trip API ─────────────────────────────────────────────────────────────────
 
 /**
@@ -138,6 +145,21 @@ export async function confirmTrip(tripId: number): Promise<boolean> {
  */
 export async function renameTrip(tripId: number, name: string): Promise<boolean> {
   return invoke<boolean>("cmd_rename_trip", { tripId, name });
+}
+
+/**
+ * Set (or clear) the cover photo for a trip.
+ *
+ * `photoId` must be a photo that already belongs to `tripId`.  Pass `null`
+ * to clear the cover photo.
+ *
+ * @returns `true` on success, `false` when the trip or photo is not found.
+ */
+export async function setTripCoverPhoto(
+  tripId: number,
+  photoId: number | null
+): Promise<boolean> {
+  return invoke<boolean>("cmd_set_trip_cover_photo", { tripId, photoId });
 }
 
 /**

@@ -7,7 +7,7 @@ use photomap_core::{
     upsert_photo, query_by_time_range, query_by_bounding_box, query_all_photos,
     get_photo_by_path, get_photo_by_id, delete_photo_by_path, scan_directory,
     create_trip, list_trips, get_trip, delete_trip,
-    confirm_trip, rename_trip, set_photo_trip,
+    confirm_trip, rename_trip, set_photo_trip, set_trip_cover_photo,
     query_photos_by_trip, query_untripped_photos, auto_group_trips,
     delete_all_suggested_trips,
     suggest_photos_for_trips,
@@ -168,6 +168,19 @@ pub fn cmd_get_photo_by_path(
     get_photo_by_path(&conn, &file_path)
 }
 
+/// Return a single photo by its database id, or `null` / `None` if not found.
+///
+/// # Errors
+/// Returns the database error string on failure.
+#[tauri::command]
+pub fn cmd_get_photo_by_id(
+    state: State<'_, DbState>,
+    photo_id: i64,
+) -> Result<Option<Photo>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    get_photo_by_id(&conn, photo_id)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Trip commands
 // ──────────────────────────────────────────────────────────────────────────────
@@ -248,6 +261,24 @@ pub fn cmd_rename_trip(
 ) -> Result<bool, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
     rename_trip(&conn, trip_id, &name)
+}
+
+/// Set (or clear) the cover photo for a trip.
+///
+/// `photo_id` must be a photo that already belongs to `trip_id`.  Passing
+/// `None` clears the cover.  Returns `true` on success, `false` when the trip
+/// or photo is not found or the photo does not belong to the trip.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_set_trip_cover_photo(
+    state: State<'_, DbState>,
+    trip_id: i64,
+    photo_id: Option<i64>,
+) -> Result<bool, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    set_trip_cover_photo(&conn, trip_id, photo_id)
 }
 
 /// Assign or unassign a photo to/from a trip.

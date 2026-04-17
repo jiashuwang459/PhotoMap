@@ -162,6 +162,38 @@ pub fn rename_trip(conn: &Connection, trip_id: i64, name: &str) -> Result<bool, 
     Ok(n > 0)
 }
 
+/// Set the cover photo for a trip.
+///
+/// `photo_id` may be `None` to clear the cover photo.  The photo must belong
+/// to the trip (its `trip_id` column must equal `trip_id`); if it does not,
+/// the function returns `false` without modifying the database.
+///
+/// Returns `true` if the trip was found and updated.
+pub fn set_trip_cover_photo(
+    conn: &Connection,
+    trip_id: i64,
+    photo_id: Option<i64>,
+) -> Result<bool, DbError> {
+    // Validate: photo must belong to this trip (skip validation when clearing).
+    if let Some(pid) = photo_id {
+        let belongs: bool = conn
+            .prepare_cached(
+                "SELECT COUNT(*) FROM photos WHERE id = ?1 AND trip_id = ?2",
+            )?
+            .query_row(rusqlite::params![pid, trip_id], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !belongs {
+            return Ok(false);
+        }
+    }
+    let n = conn.execute(
+        "UPDATE trips SET cover_photo_id = ?1 WHERE id = ?2",
+        rusqlite::params![photo_id, trip_id],
+    )?;
+    Ok(n > 0)
+}
+
 /// Assign or unassign a photo to/from a trip.
 ///
 /// Pass `Some(trip_id)` to add the photo to the trip, or `None` to remove it
