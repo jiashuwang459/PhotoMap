@@ -4,12 +4,15 @@ import type { Photo } from "../api/types";
 /** Format a Unix epoch (seconds) as a human-readable local date and time string. */
 function formatDate(ts: number | null): string {
   if (ts === null) return "No date";
+  // Timestamps are stored as "camera local time treated as UTC", so display
+  // in UTC to recover the original camera clock reading.
   return new Date(ts * 1000).toLocaleString(undefined, {
     year: "numeric",
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: "UTC",
   });
 }
 

@@ -39,10 +39,13 @@ const NOMINATIM_DELAY_MS = 1100;
 
 function fmtDate(ts: number | null): string {
   if (ts === null) return "—";
+  // Timestamps are stored as "camera local time treated as UTC", so display
+  // in UTC to recover the original camera clock reading.
   return new Date(ts * 1000).toLocaleDateString(undefined, {
     year: "numeric",
     month: "short",
     day: "numeric",
+    timeZone: "UTC",
   });
 }
 
@@ -502,6 +505,7 @@ function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps)
                         day: "numeric",
                         hour: "2-digit",
                         minute: "2-digit",
+                        timeZone: "UTC",
                       })
                     : "No date"}
                 </span>
@@ -1079,6 +1083,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
                         year: "numeric",
                         month: "short",
                         day: "numeric",
+                        timeZone: "UTC",
                       })}
                     </span>
                     <span className="trips-move-event-location">

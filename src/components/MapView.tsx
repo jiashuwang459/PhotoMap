@@ -61,12 +61,31 @@ const TRIP_COLORS = [
 
 function fmtDate(ts: number | null): string {
   if (ts === null) return "No date";
+  // Timestamps are stored as "camera local time treated as UTC", so display
+  // in UTC to recover the original camera clock reading.
   return new Date(ts * 1000).toLocaleString(undefined, {
     year: "numeric",
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: "UTC",
+  });
+}
+
+function fmtDateRange(start: number | null, end: number | null): string {
+  if (start === null && end === null) return "No dates";
+  if (start === null) return fmtShortDate(end!);
+  if (end === null || start === end) return fmtShortDate(start);
+  return `${fmtShortDate(start)} – ${fmtShortDate(end)}`;
+}
+
+function fmtShortDate(ts: number): string {
+  return new Date(ts * 1000).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
   });
 }
 
@@ -504,7 +523,7 @@ function JumpToTrip({ tripDataList }: { tripDataList: TripData[] }) {
         </option>
         {tripDataList.map((td) => (
           <option key={td.trip.id} value={String(td.trip.id)}>
-            {td.trip.name} ({td.photos.length})
+            {td.trip.name} — {fmtDateRange(td.trip.start_ts, td.trip.end_ts)} ({td.photos.length} photo{td.photos.length !== 1 ? "s" : ""})
           </option>
         ))}
       </select>

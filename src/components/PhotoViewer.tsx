@@ -7,10 +7,13 @@ import type { Photo } from "../api/types";
 
 function formatDate(ts: number | null): string {
   if (ts === null) return "No date";
+  // Timestamps are stored as "camera local time treated as UTC", so display
+  // in UTC to recover the original camera clock reading.
   return new Date(ts * 1000).toLocaleDateString(undefined, {
     year: "numeric",
     month: "long",
     day: "numeric",
+    timeZone: "UTC",
   });
 }
 
