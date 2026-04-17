@@ -19,8 +19,10 @@ pub use trips::{
     query_photos_by_trip, query_untripped_photos, auto_group_trips,
     delete_all_suggested_trips,
     suggest_photos_for_trips,
-    Trip, TripPhotoSuggestion, TripGroupResult,
+    Trip, TripPhotoSuggestion, TripGroupResult, AutoGroupDefaults,
     DEFAULT_GAP_SECONDS, DEFAULT_MIN_TRIP_KM,
+    DEFAULT_GEO_SPLIT_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP,
+    get_auto_group_defaults,
 };
 
 pub use settings::{

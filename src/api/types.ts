@@ -185,3 +185,22 @@ export interface HomeTransition {
   /** Whether the user has confirmed (accepted) this detected transition. */
   is_confirmed: boolean;
 }
+
+/**
+ * Default values for every {@link autoGroupTrips} parameter.
+ *
+ * Returned by {@link getAutoGroupDefaults} so the frontend can initialise its
+ * controls without hard-coding any numbers.
+ */
+export interface AutoGroupDefaults {
+  /** Default time-gap threshold in seconds. */
+  gap_seconds: number;
+  /** Default minimum distance from home (km) for a cluster to be kept. */
+  min_trip_km: number;
+  /** Default geographic split threshold (km). */
+  geo_split_km: number;
+  /** Default density multiplier for near-home cluster inclusion. */
+  home_density_multiplier: number;
+  /** Default minimum photos-per-cluster threshold. */
+  min_photos_per_trip: number;
+}

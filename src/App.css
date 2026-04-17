@@ -1698,16 +1698,58 @@
 .trips-group-params {
   background: #f8f9fa;
   border: 1px solid #e9ecef;
-  border-radius: 0.4rem;
-  padding: 1rem 1.25rem;
+  border-radius: 0.5rem;
+  padding: 1.1rem 1.25rem;
   margin-bottom: 1rem;
 }
 
-.trips-group-params h3 {
-  margin: 0 0 0.75rem;
-  font-size: 0.95rem;
-  color: #333;
+.trips-group-params-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
 }
+
+.trips-group-params-header h3 {
+  margin: 0;
+  font-size: 0.97rem;
+  color: #1a1a2e;
+}
+
+.trips-reset-btn {
+  font-size: 0.8rem;
+  color: #607d8b;
+  padding: 0.2rem 0.6rem;
+}
+
+.trips-reset-btn:hover:not(:disabled) {
+  color: #1a1a2e;
+}
+
+/* ── Settings sections ────────────────────────────────────────────────────── */
+
+.trips-settings-section {
+  border: 1px solid #e2e5ea;
+  border-radius: 0.4rem;
+  padding: 0.85rem 1rem;
+  margin-bottom: 0.75rem;
+  background: #fff;
+}
+
+.trips-settings-section:last-child {
+  margin-bottom: 0;
+}
+
+.trips-settings-section-title {
+  margin: 0 0 0.65rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #607d8b;
+}
+
+/* ── Parameter rows ────────────────────────────────────────────────────────── */
 
 .trips-param-row {
   margin-bottom: 0.75rem;
@@ -1717,42 +1759,74 @@
   margin-bottom: 0;
 }
 
+.trips-param-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.3rem;
+}
+
+.trips-param-label-text {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #333;
+}
+
+.trips-param-value {
+  font-size: 0.83rem;
+  font-weight: 700;
+  color: #1a1a2e;
+  background: #eef0f5;
+  border-radius: 0.25rem;
+  padding: 0.05rem 0.45rem;
+  white-space: nowrap;
+}
+
 .trips-param-label {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   margin-bottom: 0.4rem;
-  font-size: 0.9rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #333;
 }
 
 .trips-home-coords {
   color: #555;
   font-size: 0.8rem;
   font-style: italic;
+  font-weight: 400;
 }
 
 .trips-home-unset {
-  color: #999;
+  color: #e67e22;
   font-size: 0.8rem;
   font-style: italic;
+  font-weight: 400;
 }
 
 .trips-param-row-actions {
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
+  margin-bottom: 0.25rem;
 }
 
 .trips-range-slider {
-  width: 200px;
+  display: block;
+  width: 100%;
+  max-width: 360px;
   accent-color: #1a1a2e;
+  margin-bottom: 0.1rem;
 }
 
 .trips-param-hint {
-  margin: 0.35rem 0 0;
-  font-size: 0.8rem;
+  margin: 0.3rem 0 0;
+  font-size: 0.78rem;
   color: #6c757d;
-  line-height: 1.4;
+  line-height: 1.45;
 }
 
 .trips-move-events {
@@ -1763,7 +1837,7 @@
 }
 
 .trips-move-event {
-  background: #fff;
+  background: #f8f9fa;
   border: 1px solid #dee2e6;
   border-radius: 0.35rem;
   padding: 0.6rem 0.75rem;

@@ -22,6 +22,7 @@ use commands::{
     cmd_confirm_home_transition, cmd_dismiss_home_transition,
     cmd_create_home_transition,
     cmd_get_default_min_trip_km,
+    cmd_get_auto_group_defaults,
 };
 use photomap_core::db as core_db;
 use thumbnail_worker::thumbnail_worker_loop;
@@ -115,6 +116,7 @@ pub fn run() {
             cmd_dismiss_home_transition,
             cmd_create_home_transition,
             cmd_get_default_min_trip_km,
+            cmd_get_auto_group_defaults,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

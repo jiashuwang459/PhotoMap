@@ -20,7 +20,9 @@ use photomap_core::{
     detect_home_transitions,
     BoundingBox, DbError, InsertPhoto, Page, Photo, ScanError, ScanReport, Trip,
     ThumbnailBatchReport, ThumbnailError, TripPhotoSuggestion, TripGroupResult,
+    AutoGroupDefaults,
     HomeLocation, HomeTransition,
+    get_auto_group_defaults,
     DEFAULT_MIN_TRIP_KM,
 };
 use photomap_core::thumbnail::{generate_thumbnail, thumbnail_path_for, MAX_THUMB_RETRIES, ThumbnailEntryError};
@@ -344,9 +346,20 @@ pub fn cmd_auto_group_trips(
     state: State<'_, DbState>,
     gap_seconds: i64,
     min_trip_km: f64,
+    geo_split_km: f64,
+    home_density_multiplier: f64,
+    min_photos: u32,
 ) -> Result<Vec<TripGroupResult>, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
-    auto_group_trips(&conn, gap_seconds, min_trip_km)
+    auto_group_trips(&conn, gap_seconds, min_trip_km, geo_split_km, home_density_multiplier, min_photos)
+}
+
+/// Return the compile-time default values for every [`cmd_auto_group_trips`]
+/// parameter so the frontend can initialise its controls without hard-coding
+/// the numbers.
+#[tauri::command]
+pub fn cmd_get_auto_group_defaults() -> AutoGroupDefaults {
+    get_auto_group_defaults()
 }
 
 /// Delete all unconfirmed (suggested) trips in one operation.

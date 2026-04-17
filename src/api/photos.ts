@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BoundingBox, InsertPhoto, Page, Photo, ScanReport, Trip, ThumbnailBatchReport, TripGroupResult, HomeLocation, HomeTransition } from "./types";
+import type { BoundingBox, InsertPhoto, Page, Photo, ScanReport, Trip, ThumbnailBatchReport, TripGroupResult, HomeLocation, HomeTransition, AutoGroupDefaults } from "./types";
 
 /**
  * Insert or update a photo record in the database.
@@ -197,23 +197,44 @@ export async function queryUntrippedPhotos(page: Page): Promise<Photo[]> {
  *
  * When a home location is stored, clusters whose centroid is within
  * `minTripKm` km of home are only kept if their photo density exceeds the
- * library baseline by 3× (day hikes, local outings).  Pass `minTripKm = 0`
- * to disable the home filter.
+ * library baseline by `homeDensityMultiplier`× (day hikes, local outings).
+ * Pass `minTripKm = 0` to disable the home filter.
  *
  * Existing unconfirmed trips are cleared first, making this operation
  * idempotent.  Photos without a timestamp are left ungrouped.
  *
- * @param gapSeconds   Gap threshold in seconds (default: 3 days = 259 200).
- * @param minTripKm    Min distance from home (km) to always qualify as a trip
- *                     (default: 50).  Pass 0 to disable.
+ * @param gapSeconds              Gap threshold in seconds (default: 3 days).
+ * @param minTripKm               Min distance from home (km) to always qualify
+ *                                as a trip.  Pass 0 to disable.
+ * @param geoSplitKm              Geographic jump threshold (km) that forces a
+ *                                new trip boundary even within a time gap.
+ * @param homeDensityMultiplier   Near-home density multiplier.
+ * @param minPhotos               Minimum photos per cluster to keep.
  * @returns One {@link TripGroupResult} per newly created trip, including the
  *          GPS centroid for optional reverse-geocoding.
  */
 export async function autoGroupTrips(
   gapSeconds: number,
-  minTripKm: number
+  minTripKm: number,
+  geoSplitKm: number,
+  homeDensityMultiplier: number,
+  minPhotos: number
 ): Promise<TripGroupResult[]> {
-  return invoke<TripGroupResult[]>("cmd_auto_group_trips", { gapSeconds, minTripKm });
+  return invoke<TripGroupResult[]>("cmd_auto_group_trips", {
+    gapSeconds,
+    minTripKm,
+    geoSplitKm,
+    homeDensityMultiplier,
+    minPhotos,
+  });
+}
+
+/**
+ * Return the compile-time default values for every {@link autoGroupTrips}
+ * parameter.  Call once on startup to pre-fill the settings UI.
+ */
+export async function getAutoGroupDefaults(): Promise<AutoGroupDefaults> {
+  return invoke<AutoGroupDefaults>("cmd_get_auto_group_defaults");
 }
 
 /**
