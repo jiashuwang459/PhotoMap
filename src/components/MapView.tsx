@@ -114,6 +114,14 @@ interface PhotoCluster {
   photos: Photo[];
 }
 
+/** A group of spatially-nearby trip pins rendered as a single "N trips" marker. */
+interface TripCluster {
+  key: string;
+  lat: number;
+  lon: number;
+  trips: TripData[];
+}
+
 /**
  * Returns the grid-cell width in degrees for the given Leaflet zoom level.
  * Finer cells at high zoom → less aggressive clustering.
@@ -128,6 +136,18 @@ function zoomToCellDeg(zoom: number): number {
   if (zoom >= 7)  return 0.5;
   if (zoom >= 5)  return 2;
   return 12;
+}
+
+/**
+ * Returns the grid-cell width in degrees used to cluster trip pins.
+ * Intentionally small so only very nearby trips merge into a cluster.
+ */
+function zoomToTripCellDeg(zoom: number): number {
+  if (zoom >= 10) return 0.15;
+  if (zoom >= 8)  return 0.4;
+  if (zoom >= 6)  return 1.5;
+  if (zoom >= 4)  return 4;
+  return 8;
 }
 
 function clusterPhotos(photos: Photo[], zoom: number): PhotoCluster[] {
@@ -152,6 +172,36 @@ function clusterPhotos(photos: Photo[], zoom: number): PhotoCluster[] {
     lat: ps.reduce((s, p) => s + p.latitude!, 0) / ps.length,
     lon: ps.reduce((s, p) => s + p.longitude!, 0) / ps.length,
     photos: ps,
+  }));
+}
+
+/**
+ * Groups trip centroid pins into clusters when they are very close together.
+ * Single-trip cells are passed through as-is; multi-trip cells produce one
+ * "N trips" cluster marker positioned at their combined centroid.
+ */
+function clusterTrips(tripDataList: TripData[], zoom: number): TripCluster[] {
+  if (tripDataList.length === 0) return [];
+  const cellDeg = zoomToTripCellDeg(zoom);
+  const cells = new Map<string, TripData[]>();
+
+  for (const td of tripDataList) {
+    const cellX = Math.floor(td.bounds.centLon / cellDeg);
+    const cellY = Math.floor(td.bounds.centLat / cellDeg);
+    const key = `tc:${cellX}:${cellY}`;
+    let list = cells.get(key);
+    if (!list) {
+      list = [];
+      cells.set(key, list);
+    }
+    list.push(td);
+  }
+
+  return Array.from(cells.entries()).map(([key, tds]) => ({
+    key,
+    lat: tds.reduce((s, td) => s + td.bounds.centLat, 0) / tds.length,
+    lon: tds.reduce((s, td) => s + td.bounds.centLon, 0) / tds.length,
+    trips: tds,
   }));
 }
 
@@ -303,7 +353,6 @@ function makeTripIcon(td: TripData): L.DivIcon {
       ? td.trip.name.slice(0, 14) + "…"
       : td.trip.name;
   const lead = td.photos.find((p) => p.thumbnail_path);
-  const countBadge = `<span class="photo-map-count" style="background:${td.color}">${td.photos.length}</span>`;
 
   if (lead?.thumbnail_path) {
     return L.divIcon({
@@ -311,7 +360,6 @@ function makeTripIcon(td: TripData): L.DivIcon {
       html: `
         <span class="trip-map-label trip-map-label--top">${label}</span>
         <img src="${convertFileSrc(lead.thumbnail_path)}" class="photo-map-img" alt="" />
-        ${countBadge}
       `,
       iconSize: [THUMB_SIZE, THUMB_SIZE + ARROW_H + 20],
       iconAnchor: [THUMB_SIZE / 2, THUMB_SIZE + ARROW_H + 20],
@@ -322,6 +370,37 @@ function makeTripIcon(td: TripData): L.DivIcon {
     html: `
       <span class="trip-map-label trip-map-label--top">${label}</span>
       <span class="photo-map-fallback" style="background:${td.color}">✈️</span>
+    `,
+    iconSize: [60, 36 + ARROW_H + 20],
+    iconAnchor: [30, 36 + ARROW_H + 20],
+  });
+}
+
+/** Marker for a group of ≥2 nearby trips merged at this zoom level. */
+function makeTripClusterIcon(tc: TripCluster): L.DivIcon {
+  const count = tc.trips.length;
+  // Show the thumbnail of the first trip that has one.
+  const lead = tc.trips.flatMap((t) => t.photos).find((p) => p.thumbnail_path);
+  const label = `${count} trips`;
+
+  if (lead?.thumbnail_path) {
+    return L.divIcon({
+      className: "photo-map-marker photo-map-cluster",
+      html: `
+        <span class="trip-map-label trip-map-label--top">${label}</span>
+        <img src="${convertFileSrc(lead.thumbnail_path)}" class="photo-map-img photo-map-img--cluster" alt="" />
+        <span class="photo-map-count trip-cluster-count">${count}</span>
+      `,
+      iconSize: [THUMB_SIZE, THUMB_SIZE + ARROW_H + 20],
+      iconAnchor: [THUMB_SIZE / 2, THUMB_SIZE + ARROW_H + 20],
+    });
+  }
+  return L.divIcon({
+    className: "photo-map-marker photo-map-marker--no-thumb",
+    html: `
+      <span class="trip-map-label trip-map-label--top">${label}</span>
+      <span class="photo-map-fallback photo-map-fallback--cluster">✈️</span>
+      <span class="photo-map-count trip-cluster-count">${count}</span>
     `,
     iconSize: [60, 36 + ARROW_H + 20],
     iconAnchor: [30, 36 + ARROW_H + 20],
@@ -926,6 +1005,29 @@ export function MapView({ isActive }: MapViewProps) {
     return collisionFilter(clusters, mapRef.current);
   }, [clusters, viewportVersion, useCollisionFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /** Trip-level clusters — groups nearby trip pins at low zoom levels. */
+  const tripClusters = useMemo(
+    () => clusterTrips(tripDataList, zoom),
+    [tripDataList, zoom]
+  );
+
+  /** Clicking a multi-trip cluster zooms into the combined bounding box. */
+  const handleTripClusterClick = useCallback((tc: TripCluster) => {
+    if (tc.trips.length === 1) {
+      handleTripMarkerClick(tc.trips[0], zoom);
+      return;
+    }
+    const allLats = tc.trips.flatMap((t) => [t.bounds.minLat, t.bounds.maxLat]);
+    const allLons = tc.trips.flatMap((t) => [t.bounds.minLon, t.bounds.maxLon]);
+    mapRef.current?.fitBounds(
+      [
+        [Math.min(...allLats), Math.min(...allLons)],
+        [Math.max(...allLats), Math.max(...allLons)],
+      ],
+      { padding: [40, 40], maxZoom: 13, animate: true }
+    );
+  }, [zoom]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleTripClick = useCallback(
     (td: TripData) => {
       setSelectedTrip(td);
@@ -1069,15 +1171,15 @@ export function MapView({ isActive }: MapViewProps) {
             </Polygon>
           ))}
 
-        {/* Trip centroid markers (low zoom) */}
+        {/* Trip centroid markers (low zoom) — grouped into clusters when nearby */}
         {mapMode === "trips" &&
           zoom < TRIP_DETAIL_ZOOM &&
-          tripDataList.map((td) => (
+          tripClusters.map((tc) => (
             <Marker
-              key={`trip-marker-${td.trip.id}`}
-              position={[td.bounds.centLat, td.bounds.centLon]}
-              icon={makeTripIcon(td)}
-              eventHandlers={{ click: () => handleTripMarkerClick(td, zoom) }}
+              key={tc.key}
+              position={[tc.lat, tc.lon]}
+              icon={tc.trips.length === 1 ? makeTripIcon(tc.trips[0]) : makeTripClusterIcon(tc)}
+              eventHandlers={{ click: () => handleTripClusterClick(tc) }}
             />
           ))}
 
