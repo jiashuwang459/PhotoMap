@@ -250,15 +250,27 @@ pub fn query_untripped_photos(conn: &Connection, page: &Page) -> Result<Vec<Phot
 // Auto-grouping algorithm
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Default gap threshold: 12 hours between consecutive photos triggers a new
-/// trip boundary.  Half a day of inactivity spans overnight without splitting
-/// a multi-day trip, while still separating clearly distinct outings.
-pub const DEFAULT_GAP_SECONDS: i64 = 12 * 3600;
+/// Default gap threshold: 3 days between consecutive photos triggers a new
+/// trip boundary.  With the additional home-distance + density filters, a
+/// long gap is the last-resort boundary rather than the primary split signal.
+pub const DEFAULT_GAP_SECONDS: i64 = 3 * 24 * 3600;
 
 /// Haversine distance threshold (km) above which two adjacent GPS-tagged
 /// photos force a trip boundary regardless of the time gap.  500 km roughly
 /// corresponds to a domestic flight or crossing a country border.
 pub const GEO_SPLIT_KM: f64 = 500.0;
+
+/// Default minimum distance from the inferred home base (km) required for a
+/// cluster to be suggested as a trip.  Clusters whose GPS centroid is closer
+/// than this are only kept if their photo density is high enough to indicate a
+/// purposeful local outing (see [`HOME_DENSITY_MULTIPLIER`]).
+pub const DEFAULT_MIN_TRIP_KM: f64 = 50.0;
+
+/// A near-home cluster is still suggested as a trip when its photo density
+/// (photos per day) is at least this multiple above the library's baseline
+/// daily rate.  This captures concentrated local outings such as day hikes,
+/// festivals, or photo walks near home.
+pub const HOME_DENSITY_MULTIPLIER: f64 = 3.0;
 
 /// Summary of a single auto-grouped trip, returned by [`auto_group_trips`].
 ///
@@ -286,9 +298,14 @@ pub struct TripGroupResult {
 /// 4. Splits the sequence wherever two consecutive photos are more than
 ///    `gap_seconds` apart **or** both have GPS coordinates that are more than
 ///    [`GEO_SPLIT_KM`] km apart.
-/// 5. Creates one `trips` row per cluster; the name spans the date range
-///    (`"Trip 2024-06-01"` for single-day, `"Trip 2024-06-01 to 2024-06-05"`
-///    for multi-day trips).
+/// 5. Filters clusters using home-location and density signals:
+///    - If no home location is stored, all clusters are kept (legacy behaviour).
+///    - If a home location is set, clusters whose GPS centroid is within
+///      `min_trip_km` of home are only kept when their photo density exceeds
+///      the library baseline by [`HOME_DENSITY_MULTIPLIER`]× (day hikes, local
+///      outings).  Sparse near-home sessions (everyday snapshots) are dropped.
+/// 6. Creates one `trips` row per surviving cluster; the name spans the date
+///    range (`"Trip 2024-06-01"` or `"Trip 2024-06-01 to 2024-06-05"`).
 ///
 /// Photos without a `timestamp` are left ungrouped (`trip_id = NULL`).
 ///
@@ -304,6 +321,7 @@ pub struct TripGroupResult {
 pub fn auto_group_trips(
     conn: &Connection,
     gap_seconds: i64,
+    min_trip_km: f64,
 ) -> Result<Vec<TripGroupResult>, DbError> {
     // ── 1. Load confirmed trip ranges (preserve these) ────────────────────────
     struct ConfirmedRange {
@@ -418,7 +436,76 @@ pub fn auto_group_trips(
     }
     clusters.push(current);
 
-    // ── 5. Persist trips, skipping those that overlap a confirmed trip ─────────
+    // ── 5. Home-location and density filtering ────────────────────────────────
+    //
+    // When a home location is stored in settings (optionally refined by
+    // confirmed move events), clusters are filtered:
+    //
+    // * Clusters without GPS data pass through unchanged.
+    // * Clusters whose centroid is farther than `min_trip_km` from home are
+    //   always kept (away trips / travel).
+    // * Near-home clusters are kept only when their photo density is at least
+    //   `HOME_DENSITY_MULTIPLIER` × the library's baseline daily rate —
+    //   this captures concentrated local outings (day hikes, festivals) while
+    //   discarding everyday home snapshots.
+    // * When no home location is set the filter is skipped entirely.
+
+    // Baseline density: photos per day across the unconfirmed pool.
+    let baseline_density = if photo_rows.len() >= 2 {
+        let span_secs = photo_rows.last().unwrap().timestamp
+            - photo_rows.first().unwrap().timestamp;
+        let days = (span_secs as f64 / 86_400.0).max(1.0);
+        photo_rows.len() as f64 / days
+    } else {
+        1.0
+    };
+
+    // Mid-cluster timestamp used to resolve the effective home when move
+    // events are in play.
+    let mid_ts = |c: &Cluster| (c.start_ts + c.end_ts) / 2;
+
+    // Determine whether to apply home filtering and cache the home-lookup
+    // result for clusters whose centroid is within range.
+    let home_filter_active = min_trip_km > 0.0 && {
+        // Peek at the settings to see if any home is configured.
+        super::settings::get_home_location(conn)?.is_some()
+    };
+
+    let clusters: Vec<Cluster> = if home_filter_active {
+        clusters
+            .into_iter()
+            .filter(|c| {
+                // Compute the cluster's GPS centroid (if available).
+                if c.lats.is_empty() {
+                    return true; // No GPS → can't filter → keep.
+                }
+                let n = c.lats.len() as f64;
+                let cent_lat = c.lats.iter().sum::<f64>() / n;
+                let cent_lon = c.lons.iter().sum::<f64>() / n;
+
+                // Effective home at the cluster's midpoint timestamp.
+                let home = match super::settings::home_at(conn, mid_ts(c)) {
+                    Ok(Some(h)) => h,
+                    _ => return true, // Settings read failed or no home → keep.
+                };
+
+                let dist_km = haversine_km(home.lat, home.lon, cent_lat, cent_lon);
+                if dist_km >= min_trip_km {
+                    return true; // Far from home → definitely a trip.
+                }
+
+                // Near home: keep only if density spikes above the baseline.
+                let cluster_days =
+                    ((c.end_ts - c.start_ts) as f64 / 86_400.0).max(1.0);
+                let cluster_density = c.photo_ids.len() as f64 / cluster_days;
+                cluster_density >= baseline_density * HOME_DENSITY_MULTIPLIER
+            })
+            .collect()
+    } else {
+        clusters
+    };
+
+    // ── 6. Persist trips, skipping those that overlap a confirmed trip ─────────
     let mut name_counts: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
     let mut results: Vec<TripGroupResult> = Vec::with_capacity(clusters.len());
@@ -770,7 +857,7 @@ mod tests {
     fn auto_group_creates_suggested_trips_basic() {
         let conn = mem_db();
         insert(&conn, "/a.jpg", Some(0));
-        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0).unwrap();
         let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
         assert!(!trip.is_confirmed, "auto-grouped trips should start as suggested");
     }
@@ -879,7 +966,7 @@ mod tests {
         insert(&conn, "/d2b.jpg", Some(3600 + 25_200 + 1800)); // 30 min later → same trip
 
         let gap = 6 * 3600; // 6 hours
-        let results = auto_group_trips(&conn, gap).unwrap();
+        let results = auto_group_trips(&conn, gap, 0.0).unwrap();
         assert_eq!(results.len(), 2, "expected exactly 2 trips");
 
         let t1 = get_trip(&conn, results[0].id).unwrap().unwrap();
@@ -891,7 +978,7 @@ mod tests {
     #[test]
     fn auto_group_with_no_photos_returns_empty() {
         let conn = mem_db();
-        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0).unwrap();
         assert!(results.is_empty());
     }
 
@@ -901,7 +988,7 @@ mod tests {
         insert(&conn, "/timed.jpg", Some(1_000_000));
         insert(&conn, "/untimed.jpg", None);
 
-        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0).unwrap();
         assert_eq!(results.len(), 1);
         let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
         assert_eq!(trip.photo_count, 1);
@@ -923,8 +1010,8 @@ mod tests {
         insert(&conn, "/a.jpg", Some(0));
         insert(&conn, "/b.jpg", Some(100));
 
-        let res1 = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
-        let res2 = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
+        let res1 = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0).unwrap();
+        let res2 = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0).unwrap();
 
         // Same number of trips; old trips are gone.
         assert_eq!(res1.len(), res2.len());
@@ -938,7 +1025,7 @@ mod tests {
     fn auto_group_single_photo_creates_one_trip() {
         let conn = mem_db();
         insert(&conn, "/solo.jpg", Some(1_700_000_000));
-        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0).unwrap();
         assert_eq!(results.len(), 1);
         let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
         assert_eq!(trip.photo_count, 1);
@@ -954,7 +1041,7 @@ mod tests {
         insert(&conn, "/a.jpg", Some(day));
         insert(&conn, "/b.jpg", Some(day + 8 * 3600));
 
-        let results = auto_group_trips(&conn, 6 * 3600).unwrap();
+        let results = auto_group_trips(&conn, 6 * 3600, 0.0).unwrap();
         assert_eq!(results.len(), 2);
         let names: Vec<String> = results
             .iter()
@@ -976,7 +1063,7 @@ mod tests {
 
         // Gap must be small enough that all 3 end up in the same trip.
         // day3 - (day1 + 3600) = 2*86400 - 3600 = 169200 s < 48*3600 (48h gap)
-        let results = auto_group_trips(&conn, 48 * 3600).unwrap();
+        let results = auto_group_trips(&conn, 48 * 3600, 0.0).unwrap();
         assert_eq!(results.len(), 1);
         let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
         assert_eq!(trip.name, "Trip 2024-01-01 to 2024-01-03");
@@ -986,7 +1073,7 @@ mod tests {
     fn auto_group_creates_suggested_trips() {
         let conn = mem_db();
         insert(&conn, "/a.jpg", Some(0));
-        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0).unwrap();
         let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
         assert!(!trip.is_confirmed, "auto-grouped trips should start as suggested");
     }
@@ -1008,7 +1095,7 @@ mod tests {
         insert_gps(&conn, "/tokyo.jpg",  3600, 35.7, 139.7);
 
         // Use a very large gap so only geo-split can separate them.
-        let results = auto_group_trips(&conn, 100 * 3600).unwrap();
+        let results = auto_group_trips(&conn, 100 * 3600, 0.0).unwrap();
         assert_eq!(results.len(), 2, "geo-split should create 2 trips");
     }
 

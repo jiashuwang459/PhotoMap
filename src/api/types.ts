@@ -149,3 +149,39 @@ export interface TripGroupResult {
   /** Average longitude of photos with GPS coordinates; null if none. */
   centroid_lon: number | null;
 }
+
+/**
+ * The inferred or user-set home (base) location.
+ *
+ * Used by {@link autoGroupTrips} to distinguish away trips (far from home)
+ * from everyday home snapshots, and displayed as a marker on the map.
+ */
+export interface HomeLocation {
+  /** WGS-84 latitude in decimal degrees. */
+  lat: number;
+  /** WGS-84 longitude in decimal degrees. */
+  lon: number;
+}
+
+/**
+ * A detected "move" event: the user's dominant GPS location shifted to a new
+ * city or region.
+ *
+ * Returned by {@link listHomeTransitions} and {@link detectHomeTransitions}.
+ * The user can confirm or dismiss each transition via the Trips panel.
+ */
+export interface HomeTransition {
+  id: number;
+  /** Unix epoch seconds of the approximate transition date. */
+  transition_ts: number;
+  /** Previous home latitude; null for the very first home entry. */
+  old_lat: number | null;
+  /** Previous home longitude; null for the very first home entry. */
+  old_lon: number | null;
+  /** New home latitude after the move. */
+  new_lat: number;
+  /** New home longitude after the move. */
+  new_lon: number;
+  /** Whether the user has confirmed (accepted) this detected transition. */
+  is_confirmed: boolean;
+}

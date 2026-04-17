@@ -19,8 +19,9 @@ import {
   queryByBoundingBox,
   queryPhotosByTrip,
   startThumbnailWorker,
+  getHomeLocation,
 } from "../api/photos";
-import type { BoundingBox, Page, Photo, Trip } from "../api/types";
+import type { BoundingBox, HomeLocation, Page, Photo, Trip } from "../api/types";
 
 // ── constants ────────────────────────────────────────────────────────────────
 
@@ -48,12 +49,6 @@ const COLLISION_PAD = 6;
  * individual photo markers. Higher value = centroid markers persist longer.
  */
 const TRIP_DETAIL_ZOOM = 14;
-
-/**
- * At or below this zoom, clicking a trip centroid marker zooms in rather
- * than opening the TripDetailPanel directly.
- */
-const TRIP_ZOOM_IN_THRESHOLD = 10;
 
 /** Rotating colour palette for trip overlays. */
 const TRIP_COLORS = [
@@ -425,6 +420,17 @@ function makeTripClusterIcon(tc: TripCluster): L.DivIcon {
     `,
     iconSize: [60, 36 + ARROW_H + 20],
     iconAnchor: [30, 36 + ARROW_H + 20],
+  });
+}
+
+/** Marker icon for the inferred home base location. */
+function makeHomeMarkerIcon(): L.DivIcon {
+  return L.divIcon({
+    className: "photo-map-marker photo-map-marker--home",
+    html: `<span class="photo-map-home-icon" aria-label="Home">🏠</span>`,
+    iconSize: [40, 40],
+    iconAnchor: [20, 40],
+    popupAnchor: [0, -44],
   });
 }
 
@@ -948,6 +954,13 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
 
   const mapRef = useRef<LeafletMap | null>(null);
 
+  // ── Home location ─────────────────────────────────────────────────────────
+  const [homeLocation, setHomeLocation] = useState<HomeLocation | null>(null);
+
+  useEffect(() => {
+    getHomeLocation().then(setHomeLocation).catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (isActive) mapRef.current?.invalidateSize();
   }, [isActive]);
@@ -1343,6 +1356,19 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
         {/* Jump to trip dropdown — inside MapContainer to access useMap() */}
         {mapMode === "trips" && tripDataList.length > 0 && (
           <JumpToTrip tripDataList={tripDataList} />
+        )}
+
+        {/* Home location marker — shown in both modes when a home is set */}
+        {homeLocation && (
+          <Marker
+            position={[homeLocation.lat, homeLocation.lon]}
+            icon={makeHomeMarkerIcon()}
+            zIndexOffset={1000}
+          >
+            <Tooltip permanent={false} direction="top" offset={[0, -44]}>
+              Home
+            </Tooltip>
+          </Marker>
         )}
 
         {/* Zoom slider — replaces the default Leaflet zoom control */}

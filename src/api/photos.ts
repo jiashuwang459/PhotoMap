@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BoundingBox, InsertPhoto, Page, Photo, ScanReport, Trip, ThumbnailBatchReport, TripGroupResult } from "./types";
+import type { BoundingBox, InsertPhoto, Page, Photo, ScanReport, Trip, ThumbnailBatchReport, TripGroupResult, HomeLocation, HomeTransition } from "./types";
 
 /**
  * Insert or update a photo record in the database.
@@ -188,19 +188,32 @@ export async function queryUntrippedPhotos(page: Page): Promise<Photo[]> {
 }
 
 /**
- * Cluster all timestamped photos into trips using a temporal-gap algorithm.
+ * Cluster all timestamped photos into trips using a combined temporal-gap,
+ * geographic-displacement, and photo-density algorithm.
  *
  * A new trip is created whenever two consecutive photos (by timestamp) are
  * more than `gapSeconds` apart, or when both have GPS coords more than 500 km
- * apart.  Existing unconfirmed trips are cleared first, making this operation
+ * apart.
+ *
+ * When a home location is stored, clusters whose centroid is within
+ * `minTripKm` km of home are only kept if their photo density exceeds the
+ * library baseline by 3× (day hikes, local outings).  Pass `minTripKm = 0`
+ * to disable the home filter.
+ *
+ * Existing unconfirmed trips are cleared first, making this operation
  * idempotent.  Photos without a timestamp are left ungrouped.
  *
- * @param gapSeconds Gap threshold in seconds (default: 12 hours = 43 200).
+ * @param gapSeconds   Gap threshold in seconds (default: 3 days = 259 200).
+ * @param minTripKm    Min distance from home (km) to always qualify as a trip
+ *                     (default: 50).  Pass 0 to disable.
  * @returns One {@link TripGroupResult} per newly created trip, including the
  *          GPS centroid for optional reverse-geocoding.
  */
-export async function autoGroupTrips(gapSeconds: number): Promise<TripGroupResult[]> {
-  return invoke<TripGroupResult[]>("cmd_auto_group_trips", { gapSeconds });
+export async function autoGroupTrips(
+  gapSeconds: number,
+  minTripKm: number
+): Promise<TripGroupResult[]> {
+  return invoke<TripGroupResult[]>("cmd_auto_group_trips", { gapSeconds, minTripKm });
 }
 
 /**
@@ -305,4 +318,91 @@ export async function deleteThumbnail(photoId: number): Promise<Photo | null> {
  */
 export async function clearAllThumbnails(): Promise<number> {
   return invoke<number>("cmd_clear_all_thumbnails");
+}
+
+// ── Home location API ─────────────────────────────────────────────────────────
+
+/**
+ * Return the stored home location, or `null` if none has been set.
+ *
+ * The home location is used by {@link autoGroupTrips} to distinguish away
+ * trips from everyday home snapshots.
+ */
+export async function getHomeLocation(): Promise<HomeLocation | null> {
+  return invoke<HomeLocation | null>("cmd_get_home_location");
+}
+
+/**
+ * Persist a home location (overwrites any existing value).
+ *
+ * @param lat WGS-84 latitude in decimal degrees.
+ * @param lon WGS-84 longitude in decimal degrees.
+ */
+export async function setHomeLocation(lat: number, lon: number): Promise<void> {
+  return invoke<void>("cmd_set_home_location", { lat, lon });
+}
+
+/**
+ * Infer the home location from the photo library and persist it.
+ *
+ * Bins all GPS-tagged photos into a coarse ~10 km grid and returns the
+ * centroid of the most-populated cell.  Returns `null` when the library has
+ * fewer than 5 GPS-tagged photos.
+ *
+ * The inferred location is automatically saved so subsequent
+ * {@link autoGroupTrips} calls can use it.
+ */
+export async function inferHomeLocation(): Promise<HomeLocation | null> {
+  return invoke<HomeLocation | null>("cmd_infer_home_location");
+}
+
+// ── Home transition (move event) API ─────────────────────────────────────────
+
+/**
+ * Return all home transitions ordered by transition date ascending.
+ *
+ * Includes both confirmed (user-accepted) and unconfirmed (auto-detected)
+ * transitions.
+ */
+export async function listHomeTransitions(): Promise<HomeTransition[]> {
+  return invoke<HomeTransition[]>("cmd_list_home_transitions");
+}
+
+/**
+ * Analyse the photo timeline for sustained location shifts and populate the
+ * `home_transitions` table with newly detected move events.
+ *
+ * Previously detected unconfirmed transitions are replaced; confirmed ones
+ * are preserved.  Returns the full list of transitions after the update.
+ */
+export async function detectHomeTransitions(): Promise<HomeTransition[]> {
+  return invoke<HomeTransition[]>("cmd_detect_home_transitions");
+}
+
+/**
+ * Mark a home transition as confirmed (user accepted the detected move).
+ *
+ * @returns `true` if the transition was found and updated.
+ */
+export async function confirmHomeTransition(id: number): Promise<boolean> {
+  return invoke<boolean>("cmd_confirm_home_transition", { id });
+}
+
+/**
+ * Delete a home transition (user rejected the detected move).
+ *
+ * @returns `true` if the transition was found and deleted.
+ */
+export async function dismissHomeTransition(id: number): Promise<boolean> {
+  return invoke<boolean>("cmd_dismiss_home_transition", { id });
+}
+
+/**
+ * Return the default `minTripKm` threshold for {@link autoGroupTrips}.
+ *
+ * Convenience function so the UI can initialise its slider without
+ * hard-coding the backend default value.
+ */
+export async function getDefaultMinTripKm(): Promise<number> {
+  return invoke<number>("cmd_get_default_min_trip_km");
 }

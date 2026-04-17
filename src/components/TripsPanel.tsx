@@ -6,6 +6,11 @@ import {
   createTrip,
   deleteAllSuggestedTrips,
   deleteTrip,
+  detectHomeTransitions,
+  confirmHomeTransition,
+  dismissHomeTransition,
+  getHomeLocation,
+  inferHomeLocation,
   listTrips,
   queryPhotosByTrip,
   queryUntrippedPhotos,
@@ -14,11 +19,14 @@ import {
   suggestPhotosForTrips,
 } from "../api/photos";
 import { PhotoCard } from "./PhotoCard";
-import type { Page, Photo, Trip, TripGroupResult, TripPhotoSuggestion } from "../api/types";
+import type { HomeLocation, HomeTransition, Page, Photo, Trip, TripGroupResult, TripPhotoSuggestion } from "../api/types";
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
-const DEFAULT_GAP_SECONDS = 12 * 3600; // 12 hours
+/** 3 days — gap threshold default matching the new Rust default. */
+const DEFAULT_GAP_DAYS = 3;
+/** Default minimum distance from home (km) for a cluster to be a trip. */
+const DEFAULT_MIN_TRIP_KM = 50;
 const PAGE_SIZE = 50;
 
 // Rate-limit for Nominatim: 1 request per second per ToS.
@@ -632,6 +640,20 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
   const [error, setError] = useState<string | null>(null);
   const [selectedTrip, setSelectedTrip] = useState<Trip | null>(null);
 
+  // Auto-group parameter state
+  const [gapDays, setGapDays] = useState(DEFAULT_GAP_DAYS);
+  const [minTripKm, setMinTripKm] = useState(DEFAULT_MIN_TRIP_KM);
+  const [showGroupParams, setShowGroupParams] = useState(false);
+
+  // Home location state
+  const [homeLocation, setHomeLocation] = useState<HomeLocation | null>(null);
+  const [inferringHome, setInferringHome] = useState(false);
+
+  // Move events (home transitions) state
+  const [transitions, setTransitions] = useState<HomeTransition[]>([]);
+  const [detectingMoves, setDetectingMoves] = useState(false);
+  const [showMoveEvents, setShowMoveEvents] = useState(false);
+
   // New-trip form state
   const [showNewTripForm, setShowNewTripForm] = useState(false);
   const [newTripName, setNewTripName] = useState("");
@@ -666,7 +688,59 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
 
   useEffect(() => {
     loadPage(0, []);
+    // Load the stored home location on mount.
+    getHomeLocation().then(setHomeLocation).catch(() => {});
   }, [loadPage]);
+
+  async function handleInferHome() {
+    setInferringHome(true);
+    setError(null);
+    try {
+      const result = await inferHomeLocation();
+      setHomeLocation(result);
+      if (!result) {
+        setError("Not enough GPS-tagged photos to infer a home location (need at least 5).");
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setInferringHome(false);
+    }
+  }
+
+  async function handleDetectMoves() {
+    setDetectingMoves(true);
+    setError(null);
+    try {
+      const result = await detectHomeTransitions();
+      setTransitions(result);
+      setShowMoveEvents(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDetectingMoves(false);
+    }
+  }
+
+  async function handleConfirmTransition(id: number) {
+    try {
+      await confirmHomeTransition(id);
+      setTransitions((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, is_confirmed: true } : t))
+      );
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleDismissTransition(id: number) {
+    try {
+      await dismissHomeTransition(id);
+      setTransitions((prev) => prev.filter((t) => t.id !== id));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   async function handleAutoGroup() {
     setGrouping(true);
@@ -674,7 +748,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
     setError(null);
     let results: TripGroupResult[] = [];
     try {
-      results = await autoGroupTrips(DEFAULT_GAP_SECONDS);
+      results = await autoGroupTrips(gapDays * 24 * 3600, minTripKm);
       setTrips([]);
       setOffset(0);
       await loadPageRef.current!(0, []);
@@ -835,9 +909,9 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
         <div>
           <h2>Trips</h2>
           <p className="trips-hint">
-            Photos are grouped into trips based on time gaps between shots.
-            Confirmed trips are preserved when re-grouping; only new suggestions
-            are added.
+            Photos are grouped into trips based on time gaps, geographic
+            displacement from home, and photo density. Confirmed trips are
+            preserved when re-grouping; only new suggestions are added.
           </p>
         </div>
         <div className="trips-toolbar-actions">
@@ -847,6 +921,13 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
             disabled={grouping || loading}
           >
             {grouping ? "Grouping…" : "Auto-group trips"}
+          </button>
+          <button
+            className="btn-outline"
+            onClick={() => setShowGroupParams((v) => !v)}
+            title="Configure grouping parameters"
+          >
+            ⚙ Settings
           </button>
           <button
             className="btn-outline"
@@ -867,6 +948,155 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
           </button>
         </div>
       </div>
+
+      {/* ── Grouping parameters panel ── */}
+      {showGroupParams && (
+        <div className="trips-group-params">
+          <h3>Grouping settings</h3>
+
+          {/* Home location */}
+          <div className="trips-param-row">
+            <div className="trips-param-label">
+              <span>Home location</span>
+              {homeLocation ? (
+                <span className="trips-home-coords">
+                  {homeLocation.lat.toFixed(4)}°, {homeLocation.lon.toFixed(4)}°
+                </span>
+              ) : (
+                <span className="trips-home-unset">Not set</span>
+              )}
+            </div>
+            <button
+              className="btn-outline"
+              onClick={handleInferHome}
+              disabled={inferringHome}
+              title="Infer home location from the most-visited area in your library"
+            >
+              {inferringHome ? "Inferring…" : homeLocation ? "Re-infer home" : "Infer home"}
+            </button>
+          </div>
+
+          {/* Min distance from home slider */}
+          <div className="trips-param-row">
+            <label htmlFor="min-trip-km-slider">
+              Min distance from home:{" "}
+              <strong>{minTripKm === 0 ? "disabled" : `${minTripKm} km`}</strong>
+            </label>
+            <input
+              id="min-trip-km-slider"
+              type="range"
+              min={0}
+              max={200}
+              step={5}
+              value={minTripKm}
+              onChange={(e) => setMinTripKm(Number(e.target.value))}
+              className="trips-range-slider"
+            />
+            <p className="trips-param-hint">
+              Clusters closer than this to home are only kept when their photo
+              density spikes above your daily baseline (day hikes, local
+              outings). Set to 0 to keep all clusters regardless of location.
+            </p>
+          </div>
+
+          {/* Gap threshold slider */}
+          <div className="trips-param-row">
+            <label htmlFor="gap-days-slider">
+              Gap threshold: <strong>{gapDays} day{gapDays !== 1 ? "s" : ""}</strong>
+            </label>
+            <input
+              id="gap-days-slider"
+              type="range"
+              min={1}
+              max={14}
+              step={1}
+              value={gapDays}
+              onChange={(e) => setGapDays(Number(e.target.value))}
+              className="trips-range-slider"
+            />
+            <p className="trips-param-hint">
+              A gap longer than this between consecutive photos forces a new
+              trip boundary. Longer gaps produce fewer, broader trips.
+            </p>
+          </div>
+
+          {/* Move event detection */}
+          <div className="trips-param-row">
+            <div className="trips-param-label">
+              <span>Move events</span>
+              <span className="trips-home-coords">
+                {transitions.filter((t) => t.is_confirmed).length} confirmed,{" "}
+                {transitions.filter((t) => !t.is_confirmed).length} pending
+              </span>
+            </div>
+            <div className="trips-param-row-actions">
+              <button
+                className="btn-outline"
+                onClick={handleDetectMoves}
+                disabled={detectingMoves}
+                title="Analyse your photo timeline for sustained location changes"
+              >
+                {detectingMoves ? "Detecting…" : "Detect moves"}
+              </button>
+              {transitions.length > 0 && (
+                <button
+                  className="btn-outline"
+                  onClick={() => setShowMoveEvents((v) => !v)}
+                >
+                  {showMoveEvents ? "Hide" : "Show"} move events
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Move events list */}
+          {showMoveEvents && transitions.length > 0 && (
+            <div className="trips-move-events">
+              {transitions.map((t) => (
+                <div key={t.id} className={`trips-move-event${t.is_confirmed ? " trips-move-event--confirmed" : ""}`}>
+                  <div className="trips-move-event-info">
+                    <span className="trips-move-event-date">
+                      {new Date(t.transition_ts * 1000).toLocaleDateString(undefined, {
+                        year: "numeric",
+                        month: "short",
+                        day: "numeric",
+                      })}
+                    </span>
+                    <span className="trips-move-event-location">
+                      {t.old_lat !== null
+                        ? `(${t.old_lat.toFixed(2)}°, ${t.old_lon!.toFixed(2)}°) →`
+                        : "Unknown →"}{" "}
+                      ({t.new_lat.toFixed(2)}°, {t.new_lon.toFixed(2)}°)
+                    </span>
+                    {t.is_confirmed && (
+                      <span className="trips-move-event-confirmed-badge">✓ Confirmed</span>
+                    )}
+                  </div>
+                  {!t.is_confirmed && (
+                    <div className="trips-move-event-actions">
+                      <button
+                        className="btn-outline"
+                        onClick={() => handleConfirmTransition(t.id)}
+                      >
+                        Confirm
+                      </button>
+                      <button
+                        className="btn-ghost"
+                        onClick={() => handleDismissTransition(t.id)}
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {showMoveEvents && transitions.length === 0 && (
+            <p className="trips-empty">No move events detected.</p>
+          )}
+        </div>
+      )}
 
       {/* ── New trip form ── */}
       {showNewTripForm && (

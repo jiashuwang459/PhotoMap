@@ -1,5 +1,6 @@
 pub mod photos;
 pub mod schema;
+pub mod settings;
 pub mod trips;
 
 pub use photos::{
@@ -19,4 +20,14 @@ pub use trips::{
     delete_all_suggested_trips,
     suggest_photos_for_trips,
     Trip, TripPhotoSuggestion, TripGroupResult,
+    DEFAULT_GAP_SECONDS, DEFAULT_MIN_TRIP_KM,
+};
+
+pub use settings::{
+    get_home_location, set_home_location,
+    infer_home_location, infer_and_save_home_location,
+    home_at,
+    list_home_transitions, confirm_home_transition, dismiss_home_transition,
+    detect_home_transitions,
+    HomeLocation, HomeTransition,
 };

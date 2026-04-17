@@ -148,6 +148,49 @@ pub const ADD_COLUMN_THUMB_NEEDS_REVIEW: (&str, &str, &str) = (
     "INTEGER NOT NULL DEFAULT 0",
 );
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Settings table
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// `settings` table: a simple key–value store for per-library configuration
+/// values that persist across app restarts (e.g. home latitude / longitude).
+pub const CREATE_SETTINGS_TABLE: &str = "
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT NOT NULL PRIMARY KEY,
+    value TEXT NOT NULL
+);
+";
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Home transitions table
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// `home_transitions` table: records detected "move" events where the user's
+/// dominant GPS location shifts to a new city.
+///
+/// `is_confirmed = 0` → detected automatically, pending user review.
+/// `is_confirmed = 1` → user accepted this transition.
+///
+/// `old_lat`/`old_lon` are `NULL` for the very first home entry when there is
+/// no prior known home location to compare against.
+pub const CREATE_HOME_TRANSITIONS_TABLE: &str = "
+CREATE TABLE IF NOT EXISTS home_transitions (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    transition_ts  INTEGER NOT NULL,   -- Unix epoch seconds of the approximate move date
+    old_lat        REAL,               -- Previous home latitude (NULL for the first entry)
+    old_lon        REAL,               -- Previous home longitude (NULL for the first entry)
+    new_lat        REAL    NOT NULL,   -- New home latitude after the move
+    new_lon        REAL    NOT NULL,   -- New home longitude after the move
+    is_confirmed   INTEGER NOT NULL DEFAULT 0
+);
+";
+
+/// Index for looking up home transitions in chronological order.
+pub const CREATE_IDX_HOME_TRANSITIONS_TS: &str = "
+CREATE INDEX IF NOT EXISTS idx_home_transitions_ts
+    ON home_transitions (transition_ts);
+";
+
 /// All DDL statements in migration order.
 pub const ALL_MIGRATIONS: &[&str] = &[
     CREATE_PHOTOS_TABLE,
@@ -157,4 +200,7 @@ pub const ALL_MIGRATIONS: &[&str] = &[
     CREATE_IDX_FILE_HASH,
     CREATE_TRIPS_TABLE,
     CREATE_IDX_TRIPS_START_TS,
+    CREATE_SETTINGS_TABLE,
+    CREATE_HOME_TRANSITIONS_TABLE,
+    CREATE_IDX_HOME_TRANSITIONS_TS,
 ];

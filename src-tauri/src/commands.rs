@@ -13,8 +13,14 @@ use photomap_core::{
     suggest_photos_for_trips,
     generate_thumbnail_for_photo, query_photos_needing_review,
     delete_thumbnail, clear_all_thumbnails,
+    get_home_location, set_home_location,
+    infer_and_save_home_location,
+    list_home_transitions, confirm_home_transition, dismiss_home_transition,
+    detect_home_transitions,
     BoundingBox, DbError, InsertPhoto, Page, Photo, ScanError, ScanReport, Trip,
     ThumbnailBatchReport, ThumbnailError, TripPhotoSuggestion, TripGroupResult,
+    HomeLocation, HomeTransition,
+    DEFAULT_MIN_TRIP_KM,
 };
 use photomap_core::thumbnail::{generate_thumbnail, thumbnail_path_for, MAX_THUMB_RETRIES, ThumbnailEntryError};
 
@@ -310,15 +316,22 @@ pub fn cmd_query_untripped_photos(
     query_untripped_photos(&conn, &page)
 }
 
-/// Cluster all timestamped photos into trips using a temporal-gap algorithm.
+/// Cluster all timestamped photos into trips using a combined temporal-gap,
+/// geographic-displacement, and photo-density algorithm.
 ///
 /// A new trip boundary is created whenever two consecutive photos (ordered by
 /// timestamp) are more than `gap_seconds` apart, or when both photos have GPS
-/// coordinates that are more than 500 km apart.  Existing unconfirmed
-/// (suggested) trips are cleared before new ones are written, making this
-/// operation idempotent.  Confirmed trips are never touched.
+/// coordinates that are more than 500 km apart.
 ///
-/// Photos without a timestamp are left ungrouped.
+/// When a home location is stored, clusters whose GPS centroid is within
+/// `min_trip_km` km of home are only kept if their daily photo density
+/// exceeds the library baseline by 3× (capturing dense local outings such as
+/// day hikes while discarding routine home snapshots).  Pass `min_trip_km = 0`
+/// to disable the home filter.
+///
+/// Existing unconfirmed (suggested) trips are cleared before new ones are
+/// written, making this operation idempotent.  Confirmed trips are never
+/// touched.  Photos without a timestamp are left ungrouped.
 ///
 /// Returns a [`TripGroupResult`] for each newly created trip, including the
 /// GPS centroid of the cluster so the frontend can perform reverse-geocoding.
@@ -329,9 +342,10 @@ pub fn cmd_query_untripped_photos(
 pub fn cmd_auto_group_trips(
     state: State<'_, DbState>,
     gap_seconds: i64,
+    min_trip_km: f64,
 ) -> Result<Vec<TripGroupResult>, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
-    auto_group_trips(&conn, gap_seconds)
+    auto_group_trips(&conn, gap_seconds, min_trip_km)
 }
 
 /// Delete all unconfirmed (suggested) trips in one operation.
@@ -349,6 +363,133 @@ pub fn cmd_delete_all_suggested_trips(
 ) -> Result<u64, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
     delete_all_suggested_trips(&conn)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Home location commands
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Return the stored home location, or `null` if none has been set.
+///
+/// The home location is used by [`cmd_auto_group_trips`] to distinguish away
+/// trips (far from home) from everyday home snapshots.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_get_home_location(
+    state: State<'_, DbState>,
+) -> Result<Option<HomeLocation>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    get_home_location(&conn)
+}
+
+/// Persist a home location (overwrites any existing value).
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_set_home_location(
+    state: State<'_, DbState>,
+    lat: f64,
+    lon: f64,
+) -> Result<(), DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    set_home_location(&conn, lat, lon)
+}
+
+/// Infer the home location from the photo library and persist it.
+///
+/// Bins all GPS-tagged photos into a coarse ~10 km grid and returns the
+/// centroid of the most-populated cell.  Requires at least 5 GPS-tagged
+/// photos; returns `null` when the library is too small to make a reliable
+/// inference.
+///
+/// The inferred location is automatically saved so subsequent calls to
+/// [`cmd_auto_group_trips`] can use it.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_infer_home_location(
+    state: State<'_, DbState>,
+) -> Result<Option<HomeLocation>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    infer_and_save_home_location(&conn)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Home transition (move event) commands
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Return all home transitions ordered by transition date ascending.
+///
+/// Includes both confirmed (user-accepted) and unconfirmed (auto-detected)
+/// transitions.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_list_home_transitions(
+    state: State<'_, DbState>,
+) -> Result<Vec<HomeTransition>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    list_home_transitions(&conn)
+}
+
+/// Analyse the photo timeline for sustained location shifts and populate
+/// the `home_transitions` table with newly detected move events.
+///
+/// Previously detected **unconfirmed** transitions are replaced; **confirmed**
+/// ones are preserved.  Returns the full list of transitions after the update.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_detect_home_transitions(
+    state: State<'_, DbState>,
+) -> Result<Vec<HomeTransition>, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    detect_home_transitions(&conn)
+}
+
+/// Mark a home transition as confirmed (user accepted the detected move).
+///
+/// Returns `true` if the transition was found and updated.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_confirm_home_transition(
+    state: State<'_, DbState>,
+    id: i64,
+) -> Result<bool, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    confirm_home_transition(&conn, id)
+}
+
+/// Delete a home transition (user rejected the detected move).
+///
+/// Returns `true` if the transition was found and deleted.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_dismiss_home_transition(
+    state: State<'_, DbState>,
+    id: i64,
+) -> Result<bool, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    dismiss_home_transition(&conn, id)
+}
+
+/// Return the default `min_trip_km` threshold used by [`cmd_auto_group_trips`].
+///
+/// Convenience constant so the frontend can initialise its slider without
+/// hard-coding the value.
+#[tauri::command]
+pub fn cmd_get_default_min_trip_km() -> f64 {
+    DEFAULT_MIN_TRIP_KM
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

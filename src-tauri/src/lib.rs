@@ -17,6 +17,10 @@ use commands::{
     cmd_generate_thumbnail_for_photo, cmd_suggest_photos_for_trips,
     cmd_start_thumbnail_worker, cmd_cancel_thumbnail_worker,
     cmd_delete_thumbnail, cmd_clear_all_thumbnails,
+    cmd_get_home_location, cmd_set_home_location, cmd_infer_home_location,
+    cmd_list_home_transitions, cmd_detect_home_transitions,
+    cmd_confirm_home_transition, cmd_dismiss_home_transition,
+    cmd_get_default_min_trip_km,
 };
 use photomap_core::db as core_db;
 use thumbnail_worker::thumbnail_worker_loop;
@@ -101,6 +105,14 @@ pub fn run() {
             cmd_cancel_thumbnail_worker,
             cmd_delete_thumbnail,
             cmd_clear_all_thumbnails,
+            cmd_get_home_location,
+            cmd_set_home_location,
+            cmd_infer_home_location,
+            cmd_list_home_transitions,
+            cmd_detect_home_transitions,
+            cmd_confirm_home_transition,
+            cmd_dismiss_home_transition,
+            cmd_get_default_min_trip_km,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
