@@ -142,8 +142,14 @@ function zoomToCellDeg(zoom: number): number {
  * Returns the grid-cell width in degrees used to cluster trip pins.
  * Intentionally small so only very nearby trips merge into a cluster.
  */
+/**
+ * Grid cell size (degrees) used to cluster nearby trip centroid pins.
+ * Returns 0 at zoom ≥ 12 to signal "no clustering" — every trip gets its
+ * own individual pin.
+ */
 function zoomToTripCellDeg(zoom: number): number {
-  if (zoom >= 12) return 0.04;
+  if (zoom >= 12) return 0;      // no clustering
+  if (zoom >= 11) return 0.08;
   if (zoom >= 10) return 0.15;
   if (zoom >= 9)  return 0.25;
   if (zoom >= 8)  return 0.4;
@@ -185,6 +191,17 @@ function clusterPhotos(photos: Photo[], zoom: number): PhotoCluster[] {
 function clusterTrips(tripDataList: TripData[], zoom: number): TripCluster[] {
   if (tripDataList.length === 0) return [];
   const cellDeg = zoomToTripCellDeg(zoom);
+
+  // At zoom ≥ 12 (cellDeg === 0) every trip gets its own pin — no merging.
+  if (cellDeg === 0) {
+    return tripDataList.map((td) => ({
+      key: `tc:solo:${td.trip.id}`,
+      lat: td.bounds.centLat,
+      lon: td.bounds.centLon,
+      trips: [td],
+    }));
+  }
+
   const cells = new Map<string, TripData[]>();
 
   for (const td of tripDataList) {
@@ -908,6 +925,11 @@ export function MapView({ isActive }: MapViewProps) {
    * the TripDetailPanel (TripBrowser).
    */
   const [focusedTrip, setFocusedTrip] = useState<TripData | null>(null);
+  /**
+   * The zoom level that was active when a trip was focused.
+   * Used to auto-unfocus when the user zooms back out past that level.
+   */
+  const focusZoomRef = useRef<number | null>(null);
   /** True once trip data has been fetched (avoid re-fetching on tab switch). */
   const tripsLoadedRef = useRef(false);
 
@@ -919,7 +941,10 @@ export function MapView({ isActive }: MapViewProps) {
 
   // Clear focused trip whenever the user leaves trips mode.
   useEffect(() => {
-    if (mapMode !== "trips") setFocusedTrip(null);
+    if (mapMode !== "trips") {
+      setFocusedTrip(null);
+      focusZoomRef.current = null;
+    }
   }, [mapMode]);
 
   // ── Load trip data when trips mode is first activated ─────────────────────
@@ -987,6 +1012,17 @@ export function MapView({ isActive }: MapViewProps) {
     async (bounds: LatLngBounds, newZoom: number) => {
       setZoom(newZoom);
       setViewportVersion((v) => v + 1);
+
+      // Auto-unfocus a focused trip when the user zooms out past the zoom level
+      // that was active when they focused it.
+      if (
+        focusZoomRef.current !== null &&
+        newZoom < focusZoomRef.current
+      ) {
+        setFocusedTrip(null);
+        focusZoomRef.current = null;
+      }
+
       const bbox: BoundingBox = {
         min_lat: bounds.getSouth(),
         max_lat: bounds.getNorth(),
@@ -1078,6 +1114,8 @@ export function MapView({ isActive }: MapViewProps) {
         setSelectedTrip(td);
       } else {
         // Focus the trip and fit the map to its bounding box.
+        // Record the current zoom so we can auto-unfocus on zoom-out.
+        focusZoomRef.current = zoom;
         setFocusedTrip(td);
         mapRef.current?.fitBounds(
           [
@@ -1088,7 +1126,7 @@ export function MapView({ isActive }: MapViewProps) {
         );
       }
     },
-    [focusedTrip]
+    [focusedTrip, zoom]
   );
 
   return (
