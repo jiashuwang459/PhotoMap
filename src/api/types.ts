@@ -134,3 +134,18 @@ export interface TripPhotoSuggestion {
   /** Photos that are unassigned but fall within the trip's time window. */
   photos: Photo[];
 }
+
+/**
+ * Result for a single auto-grouped trip, returned by {@link autoGroupTrips}.
+ *
+ * Carries the database id plus the GPS centroid of the cluster so the
+ * frontend can reverse-geocode the trip and rename it to a location name.
+ */
+export interface TripGroupResult {
+  /** Database id of the newly created trip. */
+  id: number;
+  /** Average latitude of photos with GPS coordinates; null if none. */
+  centroid_lat: number | null;
+  /** Average longitude of photos with GPS coordinates; null if none. */
+  centroid_lon: number | null;
+}

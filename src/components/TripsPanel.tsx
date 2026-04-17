@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   autoGroupTrips,
   confirmTrip,
+  createTrip,
+  deleteAllSuggestedTrips,
   deleteTrip,
   listTrips,
   queryPhotosByTrip,
@@ -11,12 +13,15 @@ import {
   suggestPhotosForTrips,
 } from "../api/photos";
 import { PhotoCard } from "./PhotoCard";
-import type { Page, Photo, Trip, TripPhotoSuggestion } from "../api/types";
+import type { Page, Photo, Trip, TripGroupResult, TripPhotoSuggestion } from "../api/types";
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
-const DEFAULT_GAP_SECONDS = 6 * 3600; // 6 hours
+const DEFAULT_GAP_SECONDS = 12 * 3600; // 12 hours
 const PAGE_SIZE = 50;
+
+// Rate-limit for Nominatim: 1 request per second per ToS.
+const NOMINATIM_DELAY_MS = 1100;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -408,38 +413,95 @@ function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps)
 interface TripCardProps {
   trip: Trip;
   onSelect: (trip: Trip) => void;
+  onDismiss?: (trip: Trip) => void;
 }
 
-function TripCard({ trip, onSelect }: TripCardProps) {
+function TripCard({ trip, onSelect, onDismiss }: TripCardProps) {
   return (
-    <button className="trip-card" onClick={() => onSelect(trip)}>
-      <span className="trip-card-icon" aria-hidden="true">
-        🗺️
-      </span>
-      <div className="trip-card-body">
-        <div className="trip-card-name-row">
-          <span className="trip-card-name">{trip.name}</span>
-          {!trip.is_confirmed && (
-            <span className="trip-suggested-badge trip-suggested-badge--sm">
-              Suggested
-            </span>
-          )}
+    <div className="trip-card-wrapper">
+      <button className="trip-card" onClick={() => onSelect(trip)}>
+        <span className="trip-card-icon" aria-hidden="true">
+          🗺️
+        </span>
+        <div className="trip-card-body">
+          <div className="trip-card-name-row">
+            <span className="trip-card-name">{trip.name}</span>
+            {!trip.is_confirmed && (
+              <span className="trip-suggested-badge trip-suggested-badge--sm">
+                Suggested
+              </span>
+            )}
+          </div>
+          <span className="trip-card-dates">
+            {fmtDateRange(trip.start_ts, trip.end_ts)}
+          </span>
+          <span className="trip-card-count">
+            {trip.photo_count} photo{trip.photo_count !== 1 ? "s" : ""}
+          </span>
         </div>
-        <span className="trip-card-dates">
-          {fmtDateRange(trip.start_ts, trip.end_ts)}
+        <span className="trip-card-arrow" aria-hidden="true">
+          ›
         </span>
-        <span className="trip-card-count">
-          {trip.photo_count} photo{trip.photo_count !== 1 ? "s" : ""}
-        </span>
-      </div>
-      <span className="trip-card-arrow" aria-hidden="true">
-        ›
-      </span>
-    </button>
+      </button>
+      {onDismiss && (
+        <button
+          className="trip-card-dismiss"
+          title="Dismiss suggestion"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDismiss(trip);
+          }}
+          aria-label={`Dismiss suggestion "${trip.name}"`}
+        >
+          ✕
+        </button>
+      )}
+    </div>
   );
 }
 
 // ── TripsPanel — main panel ───────────────────────────────────────────────────
+
+/** Sleep for `ms` milliseconds. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Reverse-geocode a single (lat, lon) pair via Nominatim and return a
+ * human-readable location label (e.g. "Tokyo" or "Paris, Île-de-France").
+ * Returns `null` on any failure so callers can fall back to a date name.
+ */
+async function reverseGeocode(lat: number, lon: number): Promise<string | null> {
+  try {
+    const url =
+      `https://nominatim.openstreetmap.org/reverse` +
+      `?format=jsonv2&lat=${lat}&lon=${lon}&zoom=10&addressdetails=1`;
+    const res = await fetch(url, {
+      headers: { "Accept-Language": "en", "User-Agent": "PhotoMap/0.1" },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      address?: {
+        city?: string;
+        town?: string;
+        village?: string;
+        county?: string;
+        state?: string;
+        country?: string;
+      };
+    };
+    const a = data.address ?? {};
+    const place = a.city ?? a.town ?? a.village ?? a.county;
+    const region = a.state ?? a.country;
+    if (place && region) return `${place}, ${region}`;
+    if (place) return place;
+    if (region) return region;
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 export function TripsPanel() {
   const [trips, setTrips] = useState<Trip[]>([]);
@@ -447,13 +509,24 @@ export function TripsPanel() {
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(false);
   const [grouping, setGrouping] = useState(false);
+  const [geocodingStatus, setGeocodingStatus] = useState<string | null>(null);
+  const [clearingAll, setClearingAll] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedTrip, setSelectedTrip] = useState<Trip | null>(null);
+
+  // New-trip form state
+  const [showNewTripForm, setShowNewTripForm] = useState(false);
+  const [newTripName, setNewTripName] = useState("");
+  const [creatingTrip, setCreatingTrip] = useState(false);
 
   // Photo suggestions state
   const [suggestions, setSuggestions] = useState<TripPhotoSuggestion[]>([]);
   const [suggesting, setSuggesting] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
+
+  // Keep a stable ref to loadPage so handleAutoGroup can call it after state
+  // updates without causing stale-closure issues.
+  const loadPageRef = useRef<(pageOffset: number, existing: Trip[]) => Promise<void>>();
 
   const loadPage = useCallback(async (pageOffset: number, existing: Trip[]) => {
     setLoading(true);
@@ -471,23 +544,62 @@ export function TripsPanel() {
     }
   }, []);
 
+  loadPageRef.current = loadPage;
+
   useEffect(() => {
     loadPage(0, []);
   }, [loadPage]);
 
   async function handleAutoGroup() {
     setGrouping(true);
+    setGeocodingStatus(null);
     setError(null);
+    let results: TripGroupResult[] = [];
     try {
-      await autoGroupTrips(DEFAULT_GAP_SECONDS);
+      results = await autoGroupTrips(DEFAULT_GAP_SECONDS);
       setTrips([]);
       setOffset(0);
-      await loadPage(0, []);
+      await loadPageRef.current!(0, []);
     } catch (e) {
       setError(String(e));
-    } finally {
       setGrouping(false);
+      return;
     }
+
+    setGrouping(false);
+
+    // ── Location-based naming via Nominatim ────────────────────────────────
+    // Only geocode trips that have a centroid; rate-limit to ≤ 1 req/s.
+    const withGps = results.filter(
+      (r) => r.centroid_lat !== null && r.centroid_lon !== null
+    );
+    if (withGps.length === 0) return;
+
+    setGeocodingStatus(`Geocoding 0 / ${withGps.length}…`);
+    let done = 0;
+    for (const result of withGps) {
+      const location = await reverseGeocode(
+        result.centroid_lat!,
+        result.centroid_lon!
+      );
+      done++;
+      setGeocodingStatus(`Geocoding ${done} / ${withGps.length}…`);
+      if (location) {
+        try {
+          await renameTrip(result.id, location);
+        } catch {
+          // Non-fatal: keep the date name.
+        }
+      }
+      if (done < withGps.length) {
+        await sleep(NOMINATIM_DELAY_MS);
+      }
+    }
+    setGeocodingStatus(null);
+    // Refresh trip list so renamed trips are visible.
+    setTrips([]);
+    setOffset(0);
+    await loadPageRef.current!(0, []);
   }
 
   async function handleSuggestPhotos() {
@@ -519,6 +631,49 @@ export function TripsPanel() {
 
   function handleDismissSuggestion(tripId: number) {
     setSuggestions((prev) => prev.filter((s) => s.trip_id !== tripId));
+  }
+
+  async function handleDismissSuggestedTrip(trip: Trip) {
+    try {
+      await deleteTrip(trip.id);
+      setTrips((prev) => prev.filter((t) => t.id !== trip.id));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleClearAllSuggestions() {
+    setClearingAll(true);
+    setError(null);
+    try {
+      await deleteAllSuggestedTrips();
+      setTrips([]);
+      setOffset(0);
+      await loadPage(0, []);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setClearingAll(false);
+    }
+  }
+
+  async function handleCreateTrip() {
+    const trimmed = newTripName.trim();
+    if (!trimmed) return;
+    setCreatingTrip(true);
+    setError(null);
+    try {
+      await createTrip(trimmed, null, null, true);
+      setNewTripName("");
+      setShowNewTripForm(false);
+      setTrips([]);
+      setOffset(0);
+      await loadPage(0, []);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setCreatingTrip(false);
+    }
   }
 
   function handleTripDeleted() {
@@ -576,8 +731,49 @@ export function TripsPanel() {
           >
             {suggesting ? "Finding…" : showSuggestions ? "Hide suggestions" : "Suggest photos"}
           </button>
+          <button
+            className="btn-outline"
+            onClick={() => {
+              setShowNewTripForm((v) => !v);
+              setNewTripName("");
+            }}
+          >
+            {showNewTripForm ? "Cancel" : "+ New trip"}
+          </button>
         </div>
       </div>
+
+      {/* ── New trip form ── */}
+      {showNewTripForm && (
+        <div className="trips-new-trip-form">
+          <input
+            className="trip-rename-input"
+            placeholder="Trip name…"
+            value={newTripName}
+            onChange={(e) => setNewTripName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void handleCreateTrip();
+              if (e.key === "Escape") {
+                setShowNewTripForm(false);
+                setNewTripName("");
+              }
+            }}
+            autoFocus
+            disabled={creatingTrip}
+          />
+          <button
+            className="btn-primary"
+            onClick={handleCreateTrip}
+            disabled={creatingTrip || !newTripName.trim()}
+          >
+            {creatingTrip ? "Creating…" : "Create"}
+          </button>
+        </div>
+      )}
+
+      {geocodingStatus && (
+        <p className="trips-hint trips-geocoding-status">{geocodingStatus}</p>
+      )}
 
       {error && (
         <p className="trips-error" role="alert">
@@ -649,7 +845,8 @@ export function TripsPanel() {
           <p>No trips yet.</p>
           <p className="trips-hint">
             Click <strong>Auto-group trips</strong> to automatically cluster
-            your photos into trips based on the time gaps between them.
+            your photos into trips based on the time gaps between them, or use{" "}
+            <strong>+ New trip</strong> to create one manually.
           </p>
         </div>
       )}
@@ -660,10 +857,23 @@ export function TripsPanel() {
           <h3 className="trips-section-title">
             Suggested
             <span className="trips-section-count">{suggested.length}</span>
+            <button
+              className="btn-ghost trips-clear-all-btn"
+              onClick={handleClearAllSuggestions}
+              disabled={clearingAll}
+              title="Remove all suggestions"
+            >
+              {clearingAll ? "Clearing…" : "Clear all"}
+            </button>
           </h3>
           <div className="trip-list">
             {suggested.map((trip) => (
-              <TripCard key={trip.id} trip={trip} onSelect={setSelectedTrip} />
+              <TripCard
+                key={trip.id}
+                trip={trip}
+                onSelect={setSelectedTrip}
+                onDismiss={handleDismissSuggestedTrip}
+              />
             ))}
           </div>
         </section>

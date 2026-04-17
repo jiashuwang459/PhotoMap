@@ -13,8 +13,9 @@ pub use db::{
     create_trip, list_trips, get_trip, delete_trip,
     confirm_trip, rename_trip, set_photo_trip,
     query_photos_by_trip, query_untripped_photos, auto_group_trips,
+    delete_all_suggested_trips,
     suggest_photos_for_trips,
-    Trip, TripPhotoSuggestion,
+    Trip, TripPhotoSuggestion, TripGroupResult,
 };
 pub use scanner::{scan_directory, compute_sha256, ScanError, ScanReport, ScanEntryError};
 pub use thumbnail::{

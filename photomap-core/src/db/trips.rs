@@ -6,14 +6,20 @@
 //! 1. Fetch photos that are not yet assigned to any confirmed trip, ordered by
 //!    timestamp ascending.
 //! 2. Split the sequence wherever the gap between two consecutive photos exceeds
-//!    a caller-supplied threshold (default: 6 hours = 21 600 seconds).
-//! 3. Each segment becomes one trip.  The trip name is derived from the date of
-//!    its first photo (e.g. `"Trip 2024-06-01"`).  If multiple trips start on
-//!    the same date a numeric suffix is appended (`"Trip 2024-06-01 (2)"`).
+//!    a caller-supplied threshold (default: 12 hours = 43 200 seconds) **or**
+//!    where two adjacent GPS-tagged photos are more than
+//!    [`GEO_SPLIT_KM`] kilometres apart (default: 500 km), whichever comes
+//!    first.
+//! 3. Each segment becomes one trip.  The trip name is derived from the date
+//!    range of its photos (e.g. `"Trip 2024-06-01"` for a single-day trip,
+//!    `"Trip 2024-06-01 to 2024-06-05"` for multi-day trips).  If multiple
+//!    trips share the same date string a numeric suffix is appended.
 //! 4. Only **unconfirmed** (suggested) trips are cleared before the new trips
 //!    are written; confirmed trips and their photo assignments are preserved.
 //!    Clusters whose time range overlaps an existing confirmed trip are skipped
 //!    to avoid duplicate suggestions.
+//! 5. Each newly created trip also returns its GPS centroid (average lat/lon of
+//!    photos that have coordinates) so callers can perform reverse-geocoding.
 //!
 //! All functions accept a `&rusqlite::Connection` and never open their own
 //! connection, matching the convention used throughout `photomap-core`.
@@ -244,34 +250,61 @@ pub fn query_untripped_photos(conn: &Connection, page: &Page) -> Result<Vec<Phot
 // Auto-grouping algorithm
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Default gap threshold: 6 hours between consecutive photos triggers a new
-/// trip boundary.
-pub const DEFAULT_GAP_SECONDS: i64 = 6 * 3600;
+/// Default gap threshold: 12 hours between consecutive photos triggers a new
+/// trip boundary.  Half a day of inactivity spans overnight without splitting
+/// a multi-day trip, while still separating clearly distinct outings.
+pub const DEFAULT_GAP_SECONDS: i64 = 12 * 3600;
+
+/// Haversine distance threshold (km) above which two adjacent GPS-tagged
+/// photos force a trip boundary regardless of the time gap.  500 km roughly
+/// corresponds to a domestic flight or crossing a country border.
+pub const GEO_SPLIT_KM: f64 = 500.0;
+
+/// Summary of a single auto-grouped trip, returned by [`auto_group_trips`].
+///
+/// Carries the database id plus the GPS centroid of the cluster (if at least
+/// one photo had coordinates) so the caller can perform reverse-geocoding and
+/// rename the trip to a location-based name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TripGroupResult {
+    /// Database id of the newly created trip.
+    pub id: i64,
+    /// Average latitude of photos in this trip that have GPS coordinates.
+    /// `None` when no photos carry GPS data.
+    pub centroid_lat: Option<f64>,
+    /// Average longitude of photos in this trip that have GPS coordinates.
+    /// `None` when no photos carry GPS data.
+    pub centroid_lon: Option<f64>,
+}
 
 /// Cluster all timestamped photos into trips and persist the result.
 ///
 /// The algorithm:
-/// 1. Clears all existing trips and unsets every `photos.trip_id`.
-/// 2. Loads every photo that has a `timestamp`, ordered ascending.
-/// 3. Splits the sequence wherever two consecutive photos are more than
-///    `gap_seconds` apart.
-/// 4. Creates one `trips` row per cluster and batch-updates `photos.trip_id`.
+/// 1. Preserves confirmed trip ranges.
+/// 2. Clears all unconfirmed (suggested) trips.
+/// 3. Loads every photo that has a `timestamp`, ordered ascending.
+/// 4. Splits the sequence wherever two consecutive photos are more than
+///    `gap_seconds` apart **or** both have GPS coordinates that are more than
+///    [`GEO_SPLIT_KM`] km apart.
+/// 5. Creates one `trips` row per cluster; the name spans the date range
+///    (`"Trip 2024-06-01"` for single-day, `"Trip 2024-06-01 to 2024-06-05"`
+///    for multi-day trips).
 ///
 /// Photos without a `timestamp` are left ungrouped (`trip_id = NULL`).
 ///
-/// **Confirmed trips are never touched.**  Only unconfirmed (suggested) trips
-/// and their photo assignments are cleared before the new suggestions are
-/// written.  Clusters whose time range overlaps an existing confirmed trip's
-/// window are skipped to avoid creating duplicate suggestions.
+/// **Confirmed trips are never touched.**  Clusters whose time range overlaps
+/// an existing confirmed trip are skipped to avoid creating duplicate
+/// suggestions.
 ///
-/// Returns the list of newly created trip IDs.
+/// Returns a [`Vec<TripGroupResult>`] describing each newly created trip,
+/// including its GPS centroid so the caller can perform reverse-geocoding.
 ///
 /// # Errors
 /// Returns a [`DbError`] on any SQLite failure.
 pub fn auto_group_trips(
     conn: &Connection,
     gap_seconds: i64,
-) -> Result<Vec<i64>, DbError> {
+) -> Result<Vec<TripGroupResult>, DbError> {
     // ── 1. Load confirmed trip ranges (preserve these) ────────────────────────
     struct ConfirmedRange {
         start_ts: i64,
@@ -301,10 +334,12 @@ pub fn auto_group_trips(
     struct Row {
         id: i64,
         timestamp: i64,
+        latitude: Option<f64>,
+        longitude: Option<f64>,
     }
 
     let mut stmt = conn.prepare_cached(
-        "SELECT id, timestamp FROM photos
+        "SELECT id, timestamp, latitude, longitude FROM photos
          WHERE  timestamp IS NOT NULL
            AND  trip_id IS NULL
          ORDER BY timestamp ASC",
@@ -314,6 +349,8 @@ pub fn auto_group_trips(
             Ok(Row {
                 id: row.get(0)?,
                 timestamp: row.get(1)?,
+                latitude: row.get(2)?,
+                longitude: row.get(3)?,
             })
         })?
         .collect::<SqlResult<Vec<_>>>()?;
@@ -323,42 +360,91 @@ pub fn auto_group_trips(
     }
 
     // ── 4. Split into clusters ────────────────────────────────────────────────
-    let mut clusters: Vec<(i64, i64, Vec<i64>)> = Vec::new();
-    let mut current_start = photo_rows[0].timestamp;
-    let mut current_end = photo_rows[0].timestamp;
-    let mut current_ids: Vec<i64> = vec![photo_rows[0].id];
+    // Each cluster: (start_ts, end_ts, photo_ids, lats, lons)
+    struct Cluster {
+        start_ts: i64,
+        end_ts: i64,
+        photo_ids: Vec<i64>,
+        lats: Vec<f64>,
+        lons: Vec<f64>,
+    }
+
+    let first = &photo_rows[0];
+    let mut current = Cluster {
+        start_ts: first.timestamp,
+        end_ts: first.timestamp,
+        photo_ids: vec![first.id],
+        lats: first.latitude.into_iter().collect(),
+        lons: first.longitude.into_iter().collect(),
+    };
+    let mut clusters: Vec<Cluster> = Vec::new();
 
     for row in &photo_rows[1..] {
-        if row.timestamp - current_end > gap_seconds {
-            clusters.push((current_start, current_end, std::mem::take(&mut current_ids)));
-            current_start = row.timestamp;
+        // Primary split: time gap.
+        let time_split = row.timestamp - current.end_ts > gap_seconds;
+
+        // Secondary split: large geographic jump (both photos need GPS).
+        let geo_split = match (
+            current.lats.last().copied().zip(current.lons.last().copied()),
+            row.latitude.zip(row.longitude),
+        ) {
+            (Some((prev_lat, prev_lon)), Some((next_lat, next_lon))) => {
+                haversine_km(prev_lat, prev_lon, next_lat, next_lon) > GEO_SPLIT_KM
+            }
+            _ => false,
+        };
+
+        if time_split || geo_split {
+            clusters.push(std::mem::replace(
+                &mut current,
+                Cluster {
+                    start_ts: row.timestamp,
+                    end_ts: row.timestamp,
+                    photo_ids: vec![row.id],
+                    lats: row.latitude.into_iter().collect(),
+                    lons: row.longitude.into_iter().collect(),
+                },
+            ));
+        } else {
+            current.end_ts = row.timestamp;
+            current.photo_ids.push(row.id);
+            if let Some(lat) = row.latitude {
+                current.lats.push(lat);
+            }
+            if let Some(lon) = row.longitude {
+                current.lons.push(lon);
+            }
         }
-        current_end = row.timestamp;
-        current_ids.push(row.id);
     }
-    clusters.push((current_start, current_end, current_ids));
+    clusters.push(current);
 
     // ── 5. Persist trips, skipping those that overlap a confirmed trip ─────────
     let mut name_counts: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
-    let mut trip_ids: Vec<i64> = Vec::with_capacity(clusters.len());
+    let mut results: Vec<TripGroupResult> = Vec::with_capacity(clusters.len());
 
     let mut insert_trip = conn.prepare_cached(
         // is_confirmed = 0: auto-grouped trips are "suggested" by default.
         "INSERT INTO trips (name, start_ts, end_ts, is_confirmed) VALUES (?1, ?2, ?3, 0) RETURNING id",
     )?;
 
-    for (start_ts, end_ts, photo_ids) in clusters {
+    for cluster in clusters {
         // Skip clusters that overlap any confirmed trip to avoid duplicates.
         let overlaps_confirmed = confirmed_ranges.iter().any(|r| {
-            ranges_overlap(start_ts, end_ts, r.start_ts, r.end_ts)
+            ranges_overlap(cluster.start_ts, cluster.end_ts, r.start_ts, r.end_ts)
         });
         if overlaps_confirmed {
             continue;
         }
 
-        // Derive the trip name from the start date (UTC).
-        let date_str = ts_to_date_str(start_ts);
+        // Derive the trip name from the date range (UTC).
+        let start_date = ts_to_date_str(cluster.start_ts);
+        let end_date = ts_to_date_str(cluster.end_ts);
+        let date_str = if start_date == end_date {
+            start_date
+        } else {
+            format!("{start_date} to {end_date}")
+        };
         let count = name_counts.entry(date_str.clone()).or_insert(0);
         *count += 1;
         let name = if *count == 1 {
@@ -368,13 +454,29 @@ pub fn auto_group_trips(
         };
 
         let trip_id: i64 = insert_trip.query_row(
-            rusqlite::params![name, start_ts, end_ts],
+            rusqlite::params![name, cluster.start_ts, cluster.end_ts],
             |row| row.get(0),
         )?;
-        trip_ids.push(trip_id);
+
+        // Compute GPS centroid.
+        let centroid = if !cluster.lats.is_empty() {
+            let n = cluster.lats.len() as f64;
+            Some((
+                cluster.lats.iter().sum::<f64>() / n,
+                cluster.lons.iter().sum::<f64>() / n,
+            ))
+        } else {
+            None
+        };
+
+        results.push(TripGroupResult {
+            id: trip_id,
+            centroid_lat: centroid.map(|(lat, _)| lat),
+            centroid_lon: centroid.map(|(_, lon)| lon),
+        });
 
         // Batch-update photos using a parameterised IN clause.
-        let placeholders = (1..=photo_ids.len())
+        let placeholders = (1..=cluster.photo_ids.len())
             .map(|i| format!("?{}", i + 1))
             .collect::<Vec<_>>()
             .join(", ");
@@ -383,15 +485,37 @@ pub fn auto_group_trips(
         );
         let mut upd = conn.prepare_cached(&sql)?;
         let mut params: Vec<Box<dyn rusqlite::ToSql>> =
-            Vec::with_capacity(1 + photo_ids.len());
+            Vec::with_capacity(1 + cluster.photo_ids.len());
         params.push(Box::new(trip_id));
-        for pid in &photo_ids {
+        for pid in &cluster.photo_ids {
             params.push(Box::new(*pid));
         }
         upd.execute(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())))?;
     }
 
-    Ok(trip_ids)
+    Ok(results)
+}
+
+/// Delete all unconfirmed (suggested) trips in one operation.
+///
+/// Photos that belonged to those trips have their `trip_id` set to `NULL`
+/// (they are **not** removed from the library).
+///
+/// Returns the number of trips that were deleted.
+///
+/// # Errors
+/// Returns a [`DbError`] on any SQLite failure.
+pub fn delete_all_suggested_trips(conn: &Connection) -> Result<u64, DbError> {
+    conn.execute(
+        "UPDATE photos SET trip_id = NULL
+         WHERE trip_id IN (SELECT id FROM trips WHERE is_confirmed = 0)",
+        [],
+    )?;
+    let deleted = conn.execute(
+        "DELETE FROM trips WHERE is_confirmed = 0",
+        [],
+    )?;
+    Ok(deleted as u64)
 }
 
 /// Find untripped photos whose timestamps fall within confirmed trip windows
@@ -487,6 +611,23 @@ pub fn suggest_photos_for_trips(
 /// share at least one point (inclusive on both ends).
 fn ranges_overlap(a_start: i64, a_end: i64, b_start: i64, b_end: i64) -> bool {
     a_start <= b_end && b_start <= a_end
+}
+
+/// Compute the great-circle distance in kilometres between two WGS-84
+/// coordinates using the haversine formula.
+///
+/// Input angles are in decimal degrees.  The result is accurate to within
+/// ~0.5% for the distances relevant to trip splitting.
+fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    const EARTH_RADIUS_KM: f64 = 6_371.0;
+    let dlat = (lat2 - lat1).to_radians();
+    let dlon = (lon2 - lon1).to_radians();
+    let lat1_r = lat1.to_radians();
+    let lat2_r = lat2.to_radians();
+    let a = (dlat / 2.0).sin().powi(2)
+        + lat1_r.cos() * lat2_r.cos() * (dlon / 2.0).sin().powi(2);
+    let c = 2.0 * a.sqrt().asin();
+    EARTH_RADIUS_KM * c
 }
 
 fn map_trip_row(row: &rusqlite::Row<'_>) -> SqlResult<Trip> {
@@ -626,11 +767,11 @@ mod tests {
     }
 
     #[test]
-    fn auto_group_creates_suggested_trips() {
+    fn auto_group_creates_suggested_trips_basic() {
         let conn = mem_db();
         insert(&conn, "/a.jpg", Some(0));
-        let trip_ids = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
-        let trip = get_trip(&conn, trip_ids[0]).unwrap().unwrap();
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
+        let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
         assert!(!trip.is_confirmed, "auto-grouped trips should start as suggested");
     }
 
@@ -738,11 +879,11 @@ mod tests {
         insert(&conn, "/d2b.jpg", Some(3600 + 25_200 + 1800)); // 30 min later → same trip
 
         let gap = 6 * 3600; // 6 hours
-        let trip_ids = auto_group_trips(&conn, gap).unwrap();
-        assert_eq!(trip_ids.len(), 2, "expected exactly 2 trips");
+        let results = auto_group_trips(&conn, gap).unwrap();
+        assert_eq!(results.len(), 2, "expected exactly 2 trips");
 
-        let t1 = get_trip(&conn, trip_ids[0]).unwrap().unwrap();
-        let t2 = get_trip(&conn, trip_ids[1]).unwrap().unwrap();
+        let t1 = get_trip(&conn, results[0].id).unwrap().unwrap();
+        let t2 = get_trip(&conn, results[1].id).unwrap().unwrap();
         assert_eq!(t1.photo_count, 2);
         assert_eq!(t2.photo_count, 2);
     }
@@ -750,8 +891,8 @@ mod tests {
     #[test]
     fn auto_group_with_no_photos_returns_empty() {
         let conn = mem_db();
-        let trip_ids = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
-        assert!(trip_ids.is_empty());
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
+        assert!(results.is_empty());
     }
 
     #[test]
@@ -760,9 +901,9 @@ mod tests {
         insert(&conn, "/timed.jpg", Some(1_000_000));
         insert(&conn, "/untimed.jpg", None);
 
-        let trip_ids = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
-        assert_eq!(trip_ids.len(), 1);
-        let trip = get_trip(&conn, trip_ids[0]).unwrap().unwrap();
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
+        assert_eq!(results.len(), 1);
+        let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
         assert_eq!(trip.photo_count, 1);
 
         // Untimed photo must remain ungrouped.
@@ -782,24 +923,24 @@ mod tests {
         insert(&conn, "/a.jpg", Some(0));
         insert(&conn, "/b.jpg", Some(100));
 
-        let ids1 = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
-        let ids2 = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
+        let res1 = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
+        let res2 = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
 
         // Same number of trips; old trips are gone.
-        assert_eq!(ids1.len(), ids2.len());
+        assert_eq!(res1.len(), res2.len());
         // First-run trip IDs are no longer valid.
-        assert!(get_trip(&conn, ids1[0]).unwrap().is_none());
+        assert!(get_trip(&conn, res1[0].id).unwrap().is_none());
         // New trips are valid.
-        assert!(get_trip(&conn, ids2[0]).unwrap().is_some());
+        assert!(get_trip(&conn, res2[0].id).unwrap().is_some());
     }
 
     #[test]
     fn auto_group_single_photo_creates_one_trip() {
         let conn = mem_db();
         insert(&conn, "/solo.jpg", Some(1_700_000_000));
-        let trip_ids = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
-        assert_eq!(trip_ids.len(), 1);
-        let trip = get_trip(&conn, trip_ids[0]).unwrap().unwrap();
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
+        assert_eq!(results.len(), 1);
+        let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
         assert_eq!(trip.photo_count, 1);
         assert!(trip.name.starts_with("Trip "));
     }
@@ -813,13 +954,79 @@ mod tests {
         insert(&conn, "/a.jpg", Some(day));
         insert(&conn, "/b.jpg", Some(day + 8 * 3600));
 
-        let trip_ids = auto_group_trips(&conn, 6 * 3600).unwrap();
-        assert_eq!(trip_ids.len(), 2);
-        let names: Vec<String> = trip_ids
+        let results = auto_group_trips(&conn, 6 * 3600).unwrap();
+        assert_eq!(results.len(), 2);
+        let names: Vec<String> = results
             .iter()
-            .map(|id| get_trip(&conn, *id).unwrap().unwrap().name)
+            .map(|r| get_trip(&conn, r.id).unwrap().unwrap().name)
             .collect();
         assert_eq!(names[0], "Trip 2024-01-01");
         assert_eq!(names[1], "Trip 2024-01-01 (2)");
+    }
+
+    #[test]
+    fn auto_group_multiday_trip_has_date_range_name() {
+        let conn = mem_db();
+        // Photos spanning multiple days with a gap smaller than 12 h → one trip.
+        let day1 = 1_704_067_200_i64; // 2024-01-01 00:00 UTC
+        let day3 = day1 + 2 * 86_400; // 2024-01-03
+        insert(&conn, "/a.jpg", Some(day1));
+        insert(&conn, "/b.jpg", Some(day1 + 3600)); // 1h later, same cluster
+        insert(&conn, "/c.jpg", Some(day3));         // day3, but gap < 12h from /b
+
+        // Gap must be small enough that all 3 end up in the same trip.
+        // day3 - (day1 + 3600) = 2*86400 - 3600 = 169200 s < 48*3600 (48h gap)
+        let results = auto_group_trips(&conn, 48 * 3600).unwrap();
+        assert_eq!(results.len(), 1);
+        let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
+        assert_eq!(trip.name, "Trip 2024-01-01 to 2024-01-03");
+    }
+
+    #[test]
+    fn auto_group_creates_suggested_trips() {
+        let conn = mem_db();
+        insert(&conn, "/a.jpg", Some(0));
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS).unwrap();
+        let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
+        assert!(!trip.is_confirmed, "auto-grouped trips should start as suggested");
+    }
+
+    #[test]
+    fn auto_group_geo_split_on_large_distance() {
+        let conn = mem_db();
+        // Insert a helper that accepts lat/lon.
+        fn insert_gps(conn: &Connection, path: &str, ts: i64, lat: f64, lon: f64) {
+            conn.execute(
+                "INSERT INTO photos (file_path, timestamp, latitude, longitude) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![path, ts, lat, lon],
+            ).unwrap();
+        }
+
+        // London (~51.5°N, 0°W) then Tokyo (~35.7°N, 139.7°E) — ~9 555 km apart.
+        // Time gap is only 1 hour, well under any reasonable threshold.
+        insert_gps(&conn, "/london.jpg", 0, 51.5, 0.0);
+        insert_gps(&conn, "/tokyo.jpg",  3600, 35.7, 139.7);
+
+        // Use a very large gap so only geo-split can separate them.
+        let results = auto_group_trips(&conn, 100 * 3600).unwrap();
+        assert_eq!(results.len(), 2, "geo-split should create 2 trips");
+    }
+
+    #[test]
+    fn delete_all_suggested_removes_only_unconfirmed() {
+        let conn = mem_db();
+        let confirmed = create_trip(&conn, "Confirmed", None, None, true).unwrap();
+        let _suggested = create_trip(&conn, "Suggested", None, None, false).unwrap();
+
+        let deleted = delete_all_suggested_trips(&conn).unwrap();
+        assert_eq!(deleted, 1);
+
+        // Confirmed trip still exists.
+        assert!(get_trip(&conn, confirmed).unwrap().is_some());
+        // Total trips = 1.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trips", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }

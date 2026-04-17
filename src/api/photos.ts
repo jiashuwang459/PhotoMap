@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BoundingBox, InsertPhoto, Page, Photo, ScanReport, Trip, ThumbnailBatchReport } from "./types";
+import type { BoundingBox, InsertPhoto, Page, Photo, ScanReport, Trip, ThumbnailBatchReport, TripGroupResult } from "./types";
 
 /**
  * Insert or update a photo record in the database.
@@ -191,14 +191,28 @@ export async function queryUntrippedPhotos(page: Page): Promise<Photo[]> {
  * Cluster all timestamped photos into trips using a temporal-gap algorithm.
  *
  * A new trip is created whenever two consecutive photos (by timestamp) are
- * more than `gapSeconds` apart.  Existing trips are cleared first, making
- * this operation idempotent.  Photos without a timestamp are left ungrouped.
+ * more than `gapSeconds` apart, or when both have GPS coords more than 500 km
+ * apart.  Existing unconfirmed trips are cleared first, making this operation
+ * idempotent.  Photos without a timestamp are left ungrouped.
  *
- * @param gapSeconds Gap threshold in seconds (default: 6 hours = 21 600).
- * @returns The list of newly created trip ids.
+ * @param gapSeconds Gap threshold in seconds (default: 12 hours = 43 200).
+ * @returns One {@link TripGroupResult} per newly created trip, including the
+ *          GPS centroid for optional reverse-geocoding.
  */
-export async function autoGroupTrips(gapSeconds: number): Promise<number[]> {
-  return invoke<number[]>("cmd_auto_group_trips", { gapSeconds });
+export async function autoGroupTrips(gapSeconds: number): Promise<TripGroupResult[]> {
+  return invoke<TripGroupResult[]>("cmd_auto_group_trips", { gapSeconds });
+}
+
+/**
+ * Delete all unconfirmed (suggested) trips in one operation.
+ *
+ * Photos that belonged to those trips have their `trip_id` set to `null`;
+ * they are **not** removed from the library.
+ *
+ * @returns The count of trips that were deleted.
+ */
+export async function deleteAllSuggestedTrips(): Promise<number> {
+  return invoke<number>("cmd_delete_all_suggested_trips");
 }
 
 // ── Thumbnail API ─────────────────────────────────────────────────────────────

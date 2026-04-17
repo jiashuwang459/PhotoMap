@@ -9,11 +9,12 @@ use photomap_core::{
     create_trip, list_trips, get_trip, delete_trip,
     confirm_trip, rename_trip, set_photo_trip,
     query_photos_by_trip, query_untripped_photos, auto_group_trips,
+    delete_all_suggested_trips,
     suggest_photos_for_trips,
     generate_thumbnail_for_photo, query_photos_needing_review,
     delete_thumbnail, clear_all_thumbnails,
     BoundingBox, DbError, InsertPhoto, Page, Photo, ScanError, ScanReport, Trip,
-    ThumbnailBatchReport, ThumbnailError, TripPhotoSuggestion,
+    ThumbnailBatchReport, ThumbnailError, TripPhotoSuggestion, TripGroupResult,
 };
 use photomap_core::thumbnail::{generate_thumbnail, thumbnail_path_for, MAX_THUMB_RETRIES, ThumbnailEntryError};
 
@@ -312,12 +313,15 @@ pub fn cmd_query_untripped_photos(
 /// Cluster all timestamped photos into trips using a temporal-gap algorithm.
 ///
 /// A new trip boundary is created whenever two consecutive photos (ordered by
-/// timestamp) are more than `gap_seconds` apart.  Existing trips are cleared
-/// before new ones are written, making this operation idempotent.
+/// timestamp) are more than `gap_seconds` apart, or when both photos have GPS
+/// coordinates that are more than 500 km apart.  Existing unconfirmed
+/// (suggested) trips are cleared before new ones are written, making this
+/// operation idempotent.  Confirmed trips are never touched.
 ///
 /// Photos without a timestamp are left ungrouped.
 ///
-/// Returns the list of newly created trip ids.
+/// Returns a [`TripGroupResult`] for each newly created trip, including the
+/// GPS centroid of the cluster so the frontend can perform reverse-geocoding.
 ///
 /// # Errors
 /// Returns a string representation of the database error on failure.
@@ -325,9 +329,26 @@ pub fn cmd_query_untripped_photos(
 pub fn cmd_auto_group_trips(
     state: State<'_, DbState>,
     gap_seconds: i64,
-) -> Result<Vec<i64>, DbError> {
+) -> Result<Vec<TripGroupResult>, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
     auto_group_trips(&conn, gap_seconds)
+}
+
+/// Delete all unconfirmed (suggested) trips in one operation.
+///
+/// Photos that belonged to those trips have their `trip_id` set to `null`;
+/// they are **not** removed from the library.
+///
+/// Returns the count of trips that were deleted.
+///
+/// # Errors
+/// Returns a string representation of the database error on failure.
+#[tauri::command]
+pub fn cmd_delete_all_suggested_trips(
+    state: State<'_, DbState>,
+) -> Result<u64, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    delete_all_suggested_trips(&conn)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
