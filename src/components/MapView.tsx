@@ -66,10 +66,12 @@ const TRIP_COLORS = [
 
 function fmtDate(ts: number | null): string {
   if (ts === null) return "No date";
-  return new Date(ts * 1000).toLocaleDateString(undefined, {
+  return new Date(ts * 1000).toLocaleString(undefined, {
     year: "numeric",
     month: "short",
     day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
   });
 }
 
@@ -899,9 +901,11 @@ function TripDetailPanel({ tripData, onClose }: TripDetailPanelProps) {
 
 interface MapViewProps {
   isActive: boolean;
+  /** Incremented by the parent whenever trips are added, removed, or edited. */
+  tripsVersion?: number;
 }
 
-export function MapView({ isActive }: MapViewProps) {
+export function MapView({ isActive, tripsVersion }: MapViewProps) {
   const [mapMode, setMapMode] = useState<MapMode>("photos");
 
   // ── Photos-mode state ─────────────────────────────────────────────────────
@@ -956,6 +960,17 @@ export function MapView({ isActive }: MapViewProps) {
       pendingFocusZoomRef.current = false;
     }
   }, [mapMode]);
+
+  // ── Invalidate the trips cache whenever the parent signals a change ─────────
+  useEffect(() => {
+    if (tripsVersion === undefined || tripsVersion === 0) return;
+    // Mark data as stale so the next time the load effect runs it re-fetches.
+    tripsLoadedRef.current = false;
+    setTripDataList([]);
+    setFocusedTrip(null);
+    focusZoomRef.current = null;
+    pendingFocusZoomRef.current = false;
+  }, [tripsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Load trip data when trips mode is first activated ─────────────────────
   useEffect(() => {

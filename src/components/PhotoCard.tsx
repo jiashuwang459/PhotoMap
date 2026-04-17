@@ -1,13 +1,15 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { Photo } from "../api/types";
 
-/** Format a Unix epoch (seconds) as a human-readable local date string. */
+/** Format a Unix epoch (seconds) as a human-readable local date and time string. */
 function formatDate(ts: number | null): string {
   if (ts === null) return "No date";
-  return new Date(ts * 1000).toLocaleDateString(undefined, {
+  return new Date(ts * 1000).toLocaleString(undefined, {
     year: "numeric",
     month: "short",
     day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
   });
 }
 

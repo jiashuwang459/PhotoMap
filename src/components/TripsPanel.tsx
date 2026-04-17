@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   autoGroupTrips,
   confirmTrip,
@@ -145,6 +146,8 @@ function AddPhotosDrawer({ tripId, onAdded, onClose }: AddPhotosDrawerProps) {
 
 // ── TripDetail — photos inside a single trip ──────────────────────────────────
 
+type TripDetailView = "grid" | "list";
+
 interface TripDetailProps {
   trip: Trip;
   onBack: () => void;
@@ -163,6 +166,8 @@ function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps)
   const [showAddPhotos, setShowAddPhotos] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState(trip.name);
+  const [geocoding, setGeocoding] = useState(false);
+  const [viewMode, setViewMode] = useState<TripDetailView>("grid");
   const [savingName, setSavingName] = useState(false);
 
   const loadPage = useCallback(
@@ -246,6 +251,36 @@ function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps)
       setError(String(e));
     } finally {
       setSavingName(false);
+    }
+  }
+
+  async function handleGeocode() {
+    const geoPhotos = photos.filter(
+      (p) => p.latitude !== null && p.longitude !== null
+    );
+    if (geoPhotos.length === 0) {
+      setError("No geotagged photos in this trip to geocode from.");
+      return;
+    }
+    const centLat =
+      geoPhotos.reduce((s, p) => s + p.latitude!, 0) / geoPhotos.length;
+    const centLon =
+      geoPhotos.reduce((s, p) => s + p.longitude!, 0) / geoPhotos.length;
+    setGeocoding(true);
+    setError(null);
+    try {
+      const location = await reverseGeocode(centLat, centLon);
+      if (!location) {
+        setError("Could not determine a location name for this trip.");
+        return;
+      }
+      await renameTrip(trip.id, location);
+      setNameInput(location);
+      onTripChanged({ ...trip, name: location });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setGeocoding(false);
     }
   }
 
@@ -350,6 +385,14 @@ function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps)
           >
             {showAddPhotos ? "Close picker" : "+ Add photos"}
           </button>
+          <button
+            className="btn-outline"
+            onClick={handleGeocode}
+            disabled={geocoding || photos.filter((p) => p.latitude !== null).length === 0}
+            title="Reverse-geocode this trip's centroid and rename it"
+          >
+            {geocoding ? "Geocoding…" : "📍 Geocode"}
+          </button>
         </div>
       </div>
 
@@ -376,21 +419,94 @@ function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps)
         <p className="trips-empty">No photos in this trip yet.</p>
       )}
 
-      {/* ── Photo grid with per-card remove button ── */}
-      <div className="photo-grid trip-photo-grid">
-        {photos.map((p) => (
-          <div key={p.id} className="trip-photo-item">
-            <PhotoCard photo={p} />
-            <button
-              className="trip-photo-remove"
-              onClick={() => handleRemovePhoto(p.id)}
-              title="Remove from trip"
-            >
-              ✕
-            </button>
-          </div>
-        ))}
-      </div>
+      {/* ── View mode toggle ── */}
+      {photos.length > 0 && (
+        <div className="trip-view-toggle">
+          <button
+            className={`trip-view-btn${viewMode === "grid" ? " trip-view-btn--active" : ""}`}
+            onClick={() => setViewMode("grid")}
+            title="Grid view"
+            aria-pressed={viewMode === "grid"}
+          >
+            ⊞ Grid
+          </button>
+          <button
+            className={`trip-view-btn${viewMode === "list" ? " trip-view-btn--active" : ""}`}
+            onClick={() => setViewMode("list")}
+            title="List view"
+            aria-pressed={viewMode === "list"}
+          >
+            ☰ List
+          </button>
+        </div>
+      )}
+
+      {/* ── Grid view ── */}
+      {viewMode === "grid" && (
+        <div className="photo-grid trip-photo-grid">
+          {photos.map((p) => (
+            <div key={p.id} className="trip-photo-item">
+              <PhotoCard photo={p} />
+              <button
+                className="trip-photo-remove"
+                onClick={() => handleRemovePhoto(p.id)}
+                title="Remove from trip"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── List view ── */}
+      {viewMode === "list" && (
+        <div className="trip-photo-list">
+          {photos.map((p) => (
+            <div key={p.id} className="trip-photo-list-row">
+              <div className="trip-photo-list-thumb">
+                {p.thumbnail_path ? (
+                  <img
+                    src={convertFileSrc(p.thumbnail_path)}
+                    alt=""
+                    className="trip-photo-list-img"
+                  />
+                ) : (
+                  <span className="trip-photo-list-icon">🖼</span>
+                )}
+              </div>
+              <div className="trip-photo-list-info">
+                <span className="trip-photo-list-name">
+                  {p.file_path.split(/[\\/]/).pop() ?? p.file_path}
+                </span>
+                <span className="trip-photo-list-date">
+                  {p.timestamp !== null
+                    ? new Date(p.timestamp * 1000).toLocaleString(undefined, {
+                        year: "numeric",
+                        month: "short",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })
+                    : "No date"}
+                </span>
+                {p.latitude !== null && p.longitude !== null && (
+                  <span className="trip-photo-list-gps">
+                    📍 {p.latitude.toFixed(4)}°, {p.longitude.toFixed(4)}°
+                  </span>
+                )}
+              </div>
+              <button
+                className="btn-ghost trip-photo-list-remove"
+                onClick={() => handleRemovePhoto(p.id)}
+                title="Remove from trip"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {hasMore && (
         <div className="trips-load-more">
@@ -505,7 +621,7 @@ async function reverseGeocode(lat: number, lon: number): Promise<string | null> 
   }
 }
 
-export function TripsPanel() {
+export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) {
   const [trips, setTrips] = useState<Trip[]>([]);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
@@ -602,6 +718,7 @@ export function TripsPanel() {
     setTrips([]);
     setOffset(0);
     await loadPageRef.current!(0, []);
+    onTripsChanged?.();
   }
 
   async function handleSuggestPhotos() {
@@ -626,6 +743,7 @@ export function TripsPanel() {
       setTrips([]);
       setOffset(0);
       await loadPage(0, []);
+      onTripsChanged?.();
     } catch (e) {
       setError(String(e));
     }
@@ -639,6 +757,7 @@ export function TripsPanel() {
     try {
       await deleteTrip(trip.id);
       setTrips((prev) => prev.filter((t) => t.id !== trip.id));
+      onTripsChanged?.();
     } catch (e) {
       setError(String(e));
     }
@@ -652,6 +771,7 @@ export function TripsPanel() {
       setTrips([]);
       setOffset(0);
       await loadPage(0, []);
+      onTripsChanged?.();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -671,6 +791,7 @@ export function TripsPanel() {
       setTrips([]);
       setOffset(0);
       await loadPage(0, []);
+      onTripsChanged?.();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -683,11 +804,13 @@ export function TripsPanel() {
     setTrips([]);
     setOffset(0);
     loadPage(0, []);
+    onTripsChanged?.();
   }
 
   function handleTripChanged(updated: Trip) {
     setSelectedTrip(updated);
     setTrips((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+    onTripsChanged?.();
   }
 
   const suggested = trips.filter((t) => !t.is_confirmed);

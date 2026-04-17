@@ -876,6 +876,120 @@
   opacity: 1;
 }
 
+/* ── Trip detail: view mode toggle ──────────────────────────────────────── */
+
+.trip-view-toggle {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+}
+
+.trip-view-btn {
+  background: transparent;
+  border: 1px solid #dee2e6;
+  border-radius: 0.3rem;
+  color: #555;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0.25rem 0.75rem;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.trip-view-btn:hover {
+  background: #f0f4ff;
+  border-color: #4a90e2;
+  color: #4a90e2;
+}
+
+.trip-view-btn--active {
+  background: #4a90e2;
+  border-color: #4a90e2;
+  color: #fff;
+}
+
+/* ── Trip detail: list view ──────────────────────────────────────────────── */
+
+.trip-photo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.trip-photo-list-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: #fff;
+  border: 1px solid #e9ecef;
+  border-radius: 0.4rem;
+  padding: 0.5rem 0.75rem;
+  transition: background 0.12s;
+}
+
+.trip-photo-list-row:hover {
+  background: #f8f9fa;
+}
+
+.trip-photo-list-thumb {
+  width: 52px;
+  height: 52px;
+  flex-shrink: 0;
+  background: #e9ecef;
+  border-radius: 0.3rem;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.trip-photo-list-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.trip-photo-list-icon {
+  font-size: 1.5rem;
+}
+
+.trip-photo-list-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.trip-photo-list-name {
+  font-size: 0.9rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trip-photo-list-date {
+  font-size: 0.82rem;
+  color: #666;
+}
+
+.trip-photo-list-gps {
+  font-size: 0.78rem;
+  color: #888;
+}
+
+.trip-photo-list-remove {
+  flex-shrink: 0;
+  color: #dc3545;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+  padding: 0.2rem 0.45rem;
+}
+
+.trip-photo-list-row:hover .trip-photo-list-remove {
+  opacity: 1;
+}
+
 /* ── Add-photos drawer ───────────────────────────────────────────────────── */
 
 .add-photos-drawer {

@@ -40,6 +40,11 @@ function ThumbnailProgressBadge() {
 
 function AppShell() {
   const [tab, setTab] = useState<Tab>("library");
+  const [tripsVersion, setTripsVersion] = useState(0);
+
+  function handleTripsChanged() {
+    setTripsVersion((v) => v + 1);
+  }
 
   return (
     <div className="app">
@@ -85,10 +90,10 @@ function AppShell() {
           <PhotoGrid />
         </div>
         <div className={tab === "map" ? "tab-map-active" : "tab-hidden"}>
-          <MapView isActive={tab === "map"} />
+          <MapView isActive={tab === "map"} tripsVersion={tripsVersion} />
         </div>
         <div className={tab === "trips" ? "" : "tab-hidden"}>
-          <TripsPanel />
+          <TripsPanel onTripsChanged={handleTripsChanged} />
         </div>
         <div className={tab === "scan" ? "" : "tab-hidden"}>
           <ScanPanel />
