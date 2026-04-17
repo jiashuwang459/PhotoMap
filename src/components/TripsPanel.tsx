@@ -10,6 +10,7 @@ import {
   confirmHomeTransition,
   dismissHomeTransition,
   getHomeLocation,
+  getTrip,
   inferHomeLocation,
   listTrips,
   queryPhotosByTrip,
@@ -238,6 +239,9 @@ function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps)
     try {
       await setPhotoTrip(photoId, null);
       setPhotos((prev) => prev.filter((p) => p.id !== photoId));
+      // Refresh trip metadata (dates, photo count) from the DB.
+      const updated = await getTrip(trip.id);
+      if (updated) onTripChanged(updated);
     } catch (e) {
       setError(String(e));
     }
@@ -414,10 +418,13 @@ function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps)
       {showAddPhotos && (
         <AddPhotosDrawer
           tripId={trip.id}
-          onAdded={() => {
+          onAdded={async () => {
             setPhotos([]);
             setOffset(0);
             loadPage(0, []);
+            // Refresh trip metadata (dates, photo count) from the DB.
+            const updated = await getTrip(trip.id);
+            if (updated) onTripChanged(updated);
           }}
           onClose={() => setShowAddPhotos(false)}
         />
@@ -668,6 +675,9 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
   // updates without causing stale-closure issues.
   const loadPageRef = useRef<(pageOffset: number, existing: Trip[]) => Promise<void>>();
 
+  // Abort flag: set to true when the user clears suggestions mid-geocoding.
+  const geocodingAbortRef = useRef(false);
+
   const loadPage = useCallback(async (pageOffset: number, existing: Trip[]) => {
     setLoading(true);
     setError(null);
@@ -746,6 +756,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
     setGrouping(true);
     setGeocodingStatus(null);
     setError(null);
+    geocodingAbortRef.current = false;
     let results: TripGroupResult[] = [];
     try {
       results = await autoGroupTrips(gapDays * 24 * 3600, minTripKm);
@@ -770,6 +781,11 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
     setGeocodingStatus(`Geocoding 0 / ${withGps.length}…`);
     let done = 0;
     for (const result of withGps) {
+      // Stop geocoding if the user cleared suggestions while we were running.
+      if (geocodingAbortRef.current) {
+        setGeocodingStatus(null);
+        return;
+      }
       const location = await reverseGeocode(
         result.centroid_lat!,
         result.centroid_lon!
@@ -838,6 +854,9 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
   }
 
   async function handleClearAllSuggestions() {
+    // Signal the geocoding loop (if running) to stop before clearing trips.
+    geocodingAbortRef.current = true;
+    setGeocodingStatus(null);
     setClearingAll(true);
     setError(null);
     try {
