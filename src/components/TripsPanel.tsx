@@ -21,6 +21,8 @@ const DEFAULT_GAP_SECONDS = 12 * 3600; // 12 hours
 const PAGE_SIZE = 50;
 
 // Rate-limit for Nominatim: 1 request per second per ToS.
+// Using 1100ms provides a safety margin above the 1000ms minimum to
+// account for request processing time and network latency.
 const NOMINATIM_DELAY_MS = 1100;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
