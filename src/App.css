@@ -98,6 +98,9 @@
   padding: 0.25rem 0.9rem;
   pointer-events: none;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .map-status-loading {
@@ -110,6 +113,39 @@
 }
 
 .map-status-error {
+  color: #b91c1c;
+}
+
+/* Focused trip chip inside the map status bar */
+.map-status-focused-trip {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: #1a1a2e;
+  font-weight: 600;
+  pointer-events: auto;
+}
+
+.map-status-focused-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.map-status-focused-clear {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #888;
+  font-size: 0.78rem;
+  padding: 0 0.1rem;
+  line-height: 1;
+  margin-left: 0.1rem;
+}
+
+.map-status-focused-clear:hover {
   color: #b91c1c;
 }
 
@@ -1612,7 +1648,211 @@
   background: #555 !important;
 }
 
-/* ── Trip detail panel ───────────────────────────────────────────────────────── */
+/* ── Trip map pin (distinct from photo thumbnail pins) ──────────────────────── */
+
+.trip-map-pin {
+  background: transparent !important;
+  border: none !important;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.trip-map-pin-badge {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 3px solid #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.3rem;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
+  line-height: 1;
+}
+
+.trip-map-pin-badge--cluster {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #fff;
+  background: #607d8b;
+}
+
+.trip-map-pin-label {
+  margin-bottom: 2px;
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  white-space: nowrap;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  color: #1a1a2e;
+}
+
+/* ── Grouping parameters panel ──────────────────────────────────────────────── */
+
+.trips-group-params {
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 0.4rem;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.trips-group-params h3 {
+  margin: 0 0 0.75rem;
+  font-size: 0.95rem;
+  color: #333;
+}
+
+.trips-param-row {
+  margin-bottom: 0.75rem;
+}
+
+.trips-param-row:last-child {
+  margin-bottom: 0;
+}
+
+.trips-param-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.trips-home-coords {
+  color: #555;
+  font-size: 0.8rem;
+  font-style: italic;
+}
+
+.trips-home-unset {
+  color: #999;
+  font-size: 0.8rem;
+  font-style: italic;
+}
+
+.trips-param-row-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.trips-range-slider {
+  width: 200px;
+  accent-color: #1a1a2e;
+}
+
+.trips-param-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  color: #6c757d;
+  line-height: 1.4;
+}
+
+.trips-move-events {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.trips-move-event {
+  background: #fff;
+  border: 1px solid #dee2e6;
+  border-radius: 0.35rem;
+  padding: 0.6rem 0.75rem;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.trips-move-event--confirmed {
+  border-color: #4caf50;
+  background: #f1fdf1;
+}
+
+.trips-move-event-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+}
+
+.trips-move-event-date {
+  font-weight: 600;
+  color: #1a1a2e;
+}
+
+.trips-move-event-location {
+  color: #555;
+  font-size: 0.8rem;
+}
+
+.trips-move-event-confirmed-badge {
+  color: #4caf50;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.trips-move-event-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+/* ── Manual home / transition forms ────────────────────────────────────────── */
+
+.trips-manual-home-form,
+.trips-add-transition-form {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  background: #fff;
+  border: 1px solid #dee2e6;
+  border-radius: 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.trips-manual-home-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+}
+
+.trips-coord-input {
+  width: 155px;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #ced4da;
+  border-radius: 0.3rem;
+  font-size: 0.85rem;
+  -moz-appearance: textfield;
+}
+
+.trips-coord-input::-webkit-outer-spin-button,
+.trips-coord-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+}
+
+.trips-date-input {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #ced4da;
+  border-radius: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.trips-manual-home-actions {
+  display: flex;
+  gap: 0.5rem;
+}
 
 .trip-detail-dot {
   display: inline-block;

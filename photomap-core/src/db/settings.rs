@@ -209,6 +209,38 @@ pub fn confirm_home_transition(conn: &Connection, id: i64) -> Result<bool, DbErr
     Ok(n > 0)
 }
 
+/// Insert a new confirmed home-transition record and return it.
+///
+/// Use this to manually record a "moved to" event.  The transition is
+/// pre-confirmed (`is_confirmed = 1`) and is immediately honoured by
+/// [`auto_group_trips`] when deciding what counts as an away trip.
+/// `old_lat` / `old_lon` are stored as `NULL`; the prior location can be
+/// inferred from earlier transitions when needed.
+pub fn create_home_transition(
+    conn: &Connection,
+    transition_ts: i64,
+    new_lat: f64,
+    new_lon: f64,
+) -> Result<HomeTransition, DbError> {
+    let id: i64 = conn.query_row(
+        "INSERT INTO home_transitions
+             (transition_ts, old_lat, old_lon, new_lat, new_lon, is_confirmed)
+         VALUES (?1, NULL, NULL, ?2, ?3, 1)
+         RETURNING id",
+        rusqlite::params![transition_ts, new_lat, new_lon],
+        |row| row.get(0),
+    )?;
+    Ok(HomeTransition {
+        id,
+        transition_ts,
+        old_lat: None,
+        old_lon: None,
+        new_lat,
+        new_lon,
+        is_confirmed: true,
+    })
+}
+
 /// Delete a home transition (user rejected the detected move).
 ///
 /// Returns `true` if the transition was found and deleted, `false` otherwise.

@@ -20,7 +20,8 @@ pub use db::{
     get_home_location, set_home_location,
     infer_home_location, infer_and_save_home_location,
     home_at,
-    list_home_transitions, confirm_home_transition, dismiss_home_transition,
+    list_home_transitions, create_home_transition,
+    confirm_home_transition, dismiss_home_transition,
     detect_home_transitions,
     HomeLocation, HomeTransition,
 };

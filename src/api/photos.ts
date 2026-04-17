@@ -369,6 +369,30 @@ export async function listHomeTransitions(): Promise<HomeTransition[]> {
 }
 
 /**
+ * Insert a new confirmed home-transition record and return it.
+ *
+ * Use this to manually record a "moved to" event.  The transition is
+ * immediately honoured by {@link autoGroupTrips} when determining what counts
+ * as an away trip.
+ *
+ * @param transitionTs Unix epoch seconds of the approximate move date.
+ * @param newLat       WGS-84 latitude of the new home in decimal degrees.
+ * @param newLon       WGS-84 longitude of the new home in decimal degrees.
+ * @returns The newly created {@link HomeTransition} record.
+ */
+export async function createHomeTransition(
+  transitionTs: number,
+  newLat: number,
+  newLon: number
+): Promise<HomeTransition> {
+  return invoke<HomeTransition>("cmd_create_home_transition", {
+    transitionTs,
+    newLat,
+    newLon,
+  });
+}
+
+/**
  * Analyse the photo timeline for sustained location shifts and populate the
  * `home_transitions` table with newly detected move events.
  *

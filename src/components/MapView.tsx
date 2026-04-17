@@ -384,61 +384,33 @@ function makeClusterIcon(cluster: PhotoCluster): L.DivIcon {
 
 function makeTripIcon(td: TripData): L.DivIcon {
   const label =
-    td.trip.name.length > 14
-      ? td.trip.name.slice(0, 14) + "…"
+    td.trip.name.length > 16
+      ? td.trip.name.slice(0, 16) + "…"
       : td.trip.name;
-  const lead = td.photos.find((p) => p.thumbnail_path);
-
-  if (lead?.thumbnail_path) {
-    return L.divIcon({
-      className: "photo-map-marker photo-map-cluster",
-      html: `
-        <span class="trip-map-label trip-map-label--top">${label}</span>
-        <img src="${convertFileSrc(lead.thumbnail_path)}" class="photo-map-img" alt="" />
-      `,
-      iconSize: [THUMB_SIZE, THUMB_SIZE + ARROW_H + 20],
-      iconAnchor: [THUMB_SIZE / 2, THUMB_SIZE + ARROW_H + 20],
-    });
-  }
   return L.divIcon({
-    className: "photo-map-marker photo-map-marker--no-thumb",
+    className: "trip-map-pin",
     html: `
-      <span class="trip-map-label trip-map-label--top">${label}</span>
-      <span class="photo-map-fallback" style="background:${td.color}">✈️</span>
+      <span class="trip-map-pin-label">${label}</span>
+      <div class="trip-map-pin-badge" style="background:${td.color}">✈️</div>
     `,
-    iconSize: [60, 36 + ARROW_H + 20],
-    iconAnchor: [30, 36 + ARROW_H + 20],
+    iconSize: [90, 62],
+    iconAnchor: [45, 62],
+    popupAnchor: [0, -70],
   });
 }
 
 /** Marker for a group of ≥2 nearby trips merged at this zoom level. */
 function makeTripClusterIcon(tc: TripCluster): L.DivIcon {
   const count = tc.trips.length;
-  // Show the thumbnail of the first trip that has one.
-  const lead = tc.trips.flatMap((t) => t.photos).find((p) => p.thumbnail_path);
-  const label = `${count} trips`;
-
-  if (lead?.thumbnail_path) {
-    return L.divIcon({
-      className: "photo-map-marker photo-map-cluster",
-      html: `
-        <span class="trip-map-label trip-map-label--top">${label}</span>
-        <img src="${convertFileSrc(lead.thumbnail_path)}" class="photo-map-img photo-map-img--cluster" alt="" />
-        <span class="photo-map-count trip-cluster-count">${count}</span>
-      `,
-      iconSize: [THUMB_SIZE, THUMB_SIZE + ARROW_H + 20],
-      iconAnchor: [THUMB_SIZE / 2, THUMB_SIZE + ARROW_H + 20],
-    });
-  }
   return L.divIcon({
-    className: "photo-map-marker photo-map-marker--no-thumb",
+    className: "trip-map-pin",
     html: `
-      <span class="trip-map-label trip-map-label--top">${label}</span>
-      <span class="photo-map-fallback photo-map-fallback--cluster">✈️</span>
-      <span class="photo-map-count trip-cluster-count">${count}</span>
+      <span class="trip-map-pin-label">${count} trips</span>
+      <div class="trip-map-pin-badge trip-map-pin-badge--cluster">${count}</div>
     `,
-    iconSize: [60, 36 + ARROW_H + 20],
-    iconAnchor: [30, 36 + ARROW_H + 20],
+    iconSize: [90, 62],
+    iconAnchor: [45, 62],
+    popupAnchor: [0, -70],
   });
 }
 
@@ -479,15 +451,22 @@ function ViewportTracker({ onViewportChange }: ViewportTrackerProps) {
 // ── JumpToTrip ────────────────────────────────────────────────────────────────
 
 /**
- * Small dropdown rendered inside the MapContainer that flies to a selected
- * trip's centroid. Must live inside `<MapContainer>` to access `useMap()`.
+ * Small dropdown rendered inside the MapContainer that flies to and focuses a
+ * selected trip.  Uses an `onSelect` callback so the parent can update focused
+ * trip state without this component needing `useMap()`.
  *
  * `L.DomEvent.disableClickPropagation` prevents map interactions from leaking
  * through the control.
  */
-function JumpToTrip({ tripDataList }: { tripDataList: TripData[] }) {
-  const map = useMap();
+function JumpToTrip({
+  tripDataList,
+  onSelect,
+}: {
+  tripDataList: TripData[];
+  onSelect: (td: TripData) => void;
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const [value, setValue] = useState("");
 
   // Prevent map click/scroll from bleeding through the control.
   useEffect(() => {
@@ -501,23 +480,17 @@ function JumpToTrip({ tripDataList }: { tripDataList: TripData[] }) {
     const id = Number(e.target.value);
     // Blur immediately so the map doesn't receive stray mouse events.
     e.target.blur();
+    // Reset the select to the placeholder so the same trip can be re-selected.
+    setValue("");
     if (!id) return;
     const td = tripDataList.find((t) => t.trip.id === id);
     if (!td) return;
-    // fitBounds will pick the tightest zoom that shows the whole trip, capped
-    // at zoom 13 — small trips zoom to 13, large trips fit at a lower zoom.
-    map.fitBounds(
-      [
-        [td.bounds.minLat, td.bounds.minLon],
-        [td.bounds.maxLat, td.bounds.maxLon],
-      ],
-      { padding: [40, 40], maxZoom: 13, animate: true }
-    );
+    onSelect(td);
   };
 
   return (
     <div ref={containerRef} className="jump-to-trip">
-      <select defaultValue="" onChange={handleChange}>
+      <select value={value} onChange={handleChange} aria-label="Jump to trip">
         <option value="" disabled>
           Jump to trip…
         </option>
@@ -1208,6 +1181,26 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
     );
   }, [handleTripPolygonClick]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /**
+   * Always-focus variant used by the JumpToTrip dropdown.
+   *
+   * Unlike `handleTripPolygonClick`, a second call never opens the detail
+   * panel — it just re-centres the map on the trip.
+   */
+  const handleFocusTrip = useCallback((td: TripData) => {
+    pendingFocusZoomRef.current = true;
+    setFocusedTrip(td);
+    const DELTA = 0.001;
+    const minLat = Math.min(td.bounds.minLat, td.bounds.maxLat - DELTA);
+    const maxLat = Math.max(td.bounds.maxLat, td.bounds.minLat + DELTA);
+    const minLon = Math.min(td.bounds.minLon, td.bounds.maxLon - DELTA);
+    const maxLon = Math.max(td.bounds.maxLon, td.bounds.minLon + DELTA);
+    mapRef.current?.fitBounds(
+      [[minLat, minLon], [maxLat, maxLon]],
+      { padding: [40, 40], maxZoom: 14, animate: true }
+    );
+  }, []);
+
   return (
     <div className="map-view">
       {/* Mode toggle + collision filter toggle */}
@@ -1256,6 +1249,26 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
             {tripDataList.length} trip{tripDataList.length !== 1 ? "s" : ""} with GPS data
           </span>
         )}
+        {!loading && !loadingTrips && !error && mapMode === "trips" && focusedTrip && (
+          <span className="map-status-focused-trip">
+            <span
+              className="map-status-focused-dot"
+              style={{ background: focusedTrip.color }}
+            />
+            {focusedTrip.trip.name}
+            <button
+              className="map-status-focused-clear"
+              onClick={() => {
+                setFocusedTrip(null);
+                focusZoomRef.current = null;
+                pendingFocusZoomRef.current = false;
+              }}
+              title="Clear focus"
+            >
+              ✕
+            </button>
+          </span>
+        )}
         {error && (
           <span className="map-status-error" role="alert">
             {error}
@@ -1300,6 +1313,8 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
         {mapMode === "trips" &&
           tripDataList.map((td) => {
             const isFocused = focusedTrip?.trip.id === td.trip.id;
+            // When a trip is focused, hide all other trip polygons.
+            if (focusedTrip && !isFocused) return null;
             return (
               <Polygon
                 key={td.trip.id}
@@ -1374,7 +1389,7 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
 
         {/* Jump to trip dropdown — inside MapContainer to access useMap() */}
         {mapMode === "trips" && tripDataList.length > 0 && (
-          <JumpToTrip tripDataList={tripDataList} />
+          <JumpToTrip tripDataList={tripDataList} onSelect={handleFocusTrip} />
         )}
 
         {/* Home location marker — shown in both modes when a home is set */}

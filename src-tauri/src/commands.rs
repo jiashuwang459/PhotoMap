@@ -15,7 +15,8 @@ use photomap_core::{
     delete_thumbnail, clear_all_thumbnails,
     get_home_location, set_home_location,
     infer_and_save_home_location,
-    list_home_transitions, confirm_home_transition, dismiss_home_transition,
+    list_home_transitions, create_home_transition,
+    confirm_home_transition, dismiss_home_transition,
     detect_home_transitions,
     BoundingBox, DbError, InsertPhoto, Page, Photo, ScanError, ScanReport, Trip,
     ThumbnailBatchReport, ThumbnailError, TripPhotoSuggestion, TripGroupResult,
@@ -481,6 +482,22 @@ pub fn cmd_dismiss_home_transition(
 ) -> Result<bool, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
     dismiss_home_transition(&conn, id)
+}
+
+/// Insert a new confirmed home-transition record and return it.
+///
+/// Creates a manual "moved to" event that is immediately confirmed and
+/// honoured by [`cmd_auto_group_trips`] when determining what counts as
+/// an away trip.
+#[tauri::command]
+pub fn cmd_create_home_transition(
+    state: State<'_, DbState>,
+    transition_ts: i64,
+    new_lat: f64,
+    new_lon: f64,
+) -> Result<HomeTransition, DbError> {
+    let conn = state.0.lock().expect("db mutex poisoned");
+    create_home_transition(&conn, transition_ts, new_lat, new_lon)
 }
 
 /// Return the default `min_trip_km` threshold used by [`cmd_auto_group_trips`].

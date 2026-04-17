@@ -4,6 +4,7 @@ import {
   autoGroupTrips,
   confirmTrip,
   createTrip,
+  createHomeTransition,
   deleteAllSuggestedTrips,
   deleteTrip,
   detectHomeTransitions,
@@ -16,6 +17,7 @@ import {
   queryPhotosByTrip,
   queryUntrippedPhotos,
   renameTrip,
+  setHomeLocation as apiSetHomeLocation,
   setPhotoTrip,
   suggestPhotosForTrips,
 } from "../api/photos";
@@ -659,11 +661,22 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
   // Home location state
   const [homeLocation, setHomeLocation] = useState<HomeLocation | null>(null);
   const [inferringHome, setInferringHome] = useState(false);
+  // Manual home form
+  const [showManualHomeForm, setShowManualHomeForm] = useState(false);
+  const [manualLat, setManualLat] = useState("");
+  const [manualLon, setManualLon] = useState("");
+  const [settingHome, setSettingHome] = useState(false);
 
   // Move events (home transitions) state
   const [transitions, setTransitions] = useState<HomeTransition[]>([]);
   const [detectingMoves, setDetectingMoves] = useState(false);
   const [showMoveEvents, setShowMoveEvents] = useState(false);
+  // Manual transition form
+  const [showAddTransitionForm, setShowAddTransitionForm] = useState(false);
+  const [newTransitionDate, setNewTransitionDate] = useState("");
+  const [newTransitionLat, setNewTransitionLat] = useState("");
+  const [newTransitionLon, setNewTransitionLon] = useState("");
+  const [addingTransition, setAddingTransition] = useState(false);
 
   // New-trip form state
   const [showNewTripForm, setShowNewTripForm] = useState(false);
@@ -753,6 +766,57 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
       setTransitions((prev) => prev.filter((t) => t.id !== id));
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  async function handleSetManualHome() {
+    const lat = parseFloat(manualLat);
+    const lon = parseFloat(manualLon);
+    if (isNaN(lat) || isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      setError("Invalid coordinates. Latitude must be −90 to 90, longitude −180 to 180.");
+      return;
+    }
+    setSettingHome(true);
+    setError(null);
+    try {
+      await apiSetHomeLocation(lat, lon);
+      setHomeLocation({ lat, lon });
+      setShowManualHomeForm(false);
+      setManualLat("");
+      setManualLon("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSettingHome(false);
+    }
+  }
+
+  async function handleAddTransition() {
+    const lat = parseFloat(newTransitionLat);
+    const lon = parseFloat(newTransitionLon);
+    if (isNaN(lat) || isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      setError("Invalid coordinates. Latitude must be −90 to 90, longitude −180 to 180.");
+      return;
+    }
+    if (!newTransitionDate) {
+      setError("Please choose a date.");
+      return;
+    }
+    const ts = Math.floor(new Date(newTransitionDate + "T00:00:00Z").getTime() / 1000);
+    setAddingTransition(true);
+    setError(null);
+    try {
+      const created = await createHomeTransition(ts, lat, lon);
+      setTransitions((prev) => [...prev, created].sort((a, b) => a.transition_ts - b.transition_ts));
+      setShowAddTransitionForm(false);
+      setNewTransitionDate("");
+      setNewTransitionLat("");
+      setNewTransitionLon("");
+      setShowMoveEvents(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAddingTransition(false);
     }
   }
 
@@ -989,14 +1053,61 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
                 <span className="trips-home-unset">Not set</span>
               )}
             </div>
-            <button
-              className="btn-outline"
-              onClick={handleInferHome}
-              disabled={inferringHome}
-              title="Infer home location from the most-visited area in your library"
-            >
-              {inferringHome ? "Inferring…" : homeLocation ? "Re-infer home" : "Infer home"}
-            </button>
+            <div className="trips-param-row-actions">
+              <button
+                className="btn-outline"
+                onClick={handleInferHome}
+                disabled={inferringHome}
+                title="Infer home location from the most-visited area in your library"
+              >
+                {inferringHome ? "Inferring…" : homeLocation ? "Re-infer home" : "Infer home"}
+              </button>
+              <button
+                className="btn-outline"
+                onClick={() => {
+                  setShowManualHomeForm((v) => !v);
+                  setManualLat(homeLocation ? String(homeLocation.lat) : "");
+                  setManualLon(homeLocation ? String(homeLocation.lon) : "");
+                }}
+              >
+                {showManualHomeForm ? "Cancel" : "Set manually"}
+              </button>
+            </div>
+            {showManualHomeForm && (
+              <div className="trips-manual-home-form">
+                <div className="trips-manual-home-inputs">
+                  <input
+                    type="number"
+                    placeholder="Latitude (−90 to 90)"
+                    value={manualLat}
+                    onChange={(e) => setManualLat(e.target.value)}
+                    step="any"
+                    min={-90}
+                    max={90}
+                    className="trips-coord-input"
+                  />
+                  <input
+                    type="number"
+                    placeholder="Longitude (−180 to 180)"
+                    value={manualLon}
+                    onChange={(e) => setManualLon(e.target.value)}
+                    step="any"
+                    min={-180}
+                    max={180}
+                    className="trips-coord-input"
+                  />
+                </div>
+                <div className="trips-manual-home-actions">
+                  <button
+                    className="btn-primary"
+                    onClick={handleSetManualHome}
+                    disabled={settingHome || !manualLat || !manualLon}
+                  >
+                    {settingHome ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Min distance from home slider */}
@@ -1061,6 +1172,17 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
               >
                 {detectingMoves ? "Detecting…" : "Detect moves"}
               </button>
+              <button
+                className="btn-outline"
+                onClick={() => {
+                  setShowAddTransitionForm((v) => !v);
+                  setNewTransitionDate("");
+                  setNewTransitionLat("");
+                  setNewTransitionLon("");
+                }}
+              >
+                {showAddTransitionForm ? "Cancel" : "+ Add period"}
+              </button>
               {transitions.length > 0 && (
                 <button
                   className="btn-outline"
@@ -1070,6 +1192,58 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
                 </button>
               )}
             </div>
+            {showAddTransitionForm && (
+              <div className="trips-add-transition-form">
+                <p className="trips-param-hint">
+                  Record when you moved to a new home location. The date and
+                  coordinates become a confirmed transition used by trip grouping.
+                </p>
+                <div className="trips-manual-home-inputs">
+                  <input
+                    type="date"
+                    value={newTransitionDate}
+                    onChange={(e) => setNewTransitionDate(e.target.value)}
+                    className="trips-date-input"
+                    aria-label="Date you moved to this location"
+                    title="Date you moved to this location"
+                  />
+                  <input
+                    type="number"
+                    placeholder="Latitude (−90 to 90)"
+                    value={newTransitionLat}
+                    onChange={(e) => setNewTransitionLat(e.target.value)}
+                    step="any"
+                    min={-90}
+                    max={90}
+                    className="trips-coord-input"
+                  />
+                  <input
+                    type="number"
+                    placeholder="Longitude (−180 to 180)"
+                    value={newTransitionLon}
+                    onChange={(e) => setNewTransitionLon(e.target.value)}
+                    step="any"
+                    min={-180}
+                    max={180}
+                    className="trips-coord-input"
+                  />
+                </div>
+                <div className="trips-manual-home-actions">
+                  <button
+                    className="btn-primary"
+                    onClick={handleAddTransition}
+                    disabled={
+                      addingTransition ||
+                      !newTransitionDate ||
+                      !newTransitionLat ||
+                      !newTransitionLon
+                    }
+                  >
+                    {addingTransition ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Move events list */}
@@ -1109,6 +1283,17 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
                         onClick={() => handleDismissTransition(t.id)}
                       >
                         Dismiss
+                      </button>
+                    </div>
+                  )}
+                  {t.is_confirmed && (
+                    <div className="trips-move-event-actions">
+                      <button
+                        className="btn-ghost"
+                        onClick={() => handleDismissTransition(t.id)}
+                        title="Remove this home period"
+                      >
+                        Remove
                       </button>
                     </div>
                   )}
