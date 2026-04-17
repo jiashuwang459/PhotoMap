@@ -143,7 +143,9 @@ function zoomToCellDeg(zoom: number): number {
  * Intentionally small so only very nearby trips merge into a cluster.
  */
 function zoomToTripCellDeg(zoom: number): number {
+  if (zoom >= 12) return 0.04;
   if (zoom >= 10) return 0.15;
+  if (zoom >= 9)  return 0.25;
   if (zoom >= 8)  return 0.4;
   if (zoom >= 6)  return 1.5;
   if (zoom >= 4)  return 4;
@@ -900,6 +902,12 @@ export function MapView({ isActive }: MapViewProps) {
   const [tripDataList, setTripDataList] = useState<TripData[]>([]);
   const [loadingTrips, setLoadingTrips] = useState(false);
   const [selectedTrip, setSelectedTrip] = useState<TripData | null>(null);
+  /**
+   * The trip whose individual photo pins are currently shown on the map.
+   * Set by clicking a trip polygon; a second click on the same polygon opens
+   * the TripDetailPanel (TripBrowser).
+   */
+  const [focusedTrip, setFocusedTrip] = useState<TripData | null>(null);
   /** True once trip data has been fetched (avoid re-fetching on tab switch). */
   const tripsLoadedRef = useRef(false);
 
@@ -908,6 +916,11 @@ export function MapView({ isActive }: MapViewProps) {
   useEffect(() => {
     if (isActive) mapRef.current?.invalidateSize();
   }, [isActive]);
+
+  // Clear focused trip whenever the user leaves trips mode.
+  useEffect(() => {
+    if (mapMode !== "trips") setFocusedTrip(null);
+  }, [mapMode]);
 
   // ── Load trip data when trips mode is first activated ─────────────────────
   useEffect(() => {
@@ -1011,10 +1024,28 @@ export function MapView({ isActive }: MapViewProps) {
     [tripDataList, zoom]
   );
 
-  /** Clicking a multi-trip cluster zooms into the combined bounding box. */
+  /**
+   * Photo clusters for the currently focused trip.
+   * These are shown in place of bbox/centroid markers whenever a trip is focused.
+   */
+  const focusedTripClusters = useMemo(
+    () => (focusedTrip ? clusterPhotos(focusedTrip.photos, zoom) : null),
+    [focusedTrip, zoom]
+  );
+
+  const visibleFocusedTripClusters = useMemo(() => {
+    if (!focusedTripClusters) return null;
+    if (!useCollisionFilter || !mapRef.current) return focusedTripClusters;
+    return collisionFilter(focusedTripClusters, mapRef.current);
+  }, [focusedTripClusters, viewportVersion, useCollisionFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * Clicking a multi-trip cluster zooms into the combined bounding box.
+   * Clicking a single-trip cluster focuses that trip.
+   */
   const handleTripClusterClick = useCallback((tc: TripCluster) => {
     if (tc.trips.length === 1) {
-      handleTripMarkerClick(tc.trips[0], zoom);
+      handleTripPolygonClick(tc.trips[0]);
       return;
     }
     const allLats = tc.trips.flatMap((t) => [t.bounds.minLat, t.bounds.maxLat]);
@@ -1026,42 +1057,38 @@ export function MapView({ isActive }: MapViewProps) {
       ],
       { padding: [40, 40], maxZoom: 13, animate: true }
     );
-  }, [zoom]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleTripClick = useCallback(
-    (td: TripData) => {
-      setSelectedTrip(td);
-      mapRef.current?.fitBounds(
-        [
-          [td.bounds.minLat, td.bounds.minLon],
-          [td.bounds.maxLat, td.bounds.maxLon],
-        ],
-        { padding: [40, 40], maxZoom: 14 }
-      );
-    },
-    []
-  );
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
-   * Click handler for trip centroid markers.
-   * At low zoom (≤ TRIP_ZOOM_IN_THRESHOLD) we zoom in instead of opening
-   * the detail panel — the user should zoom in more before drilling down.
+   * Click handler for trip polygons.
+   *
+   * First click on any trip: fit bounds to show the whole polygon comfortably
+   * and switch to showing that trip's individual photo pins.
+   *
+   * Second click on the already-focused trip: open the TripDetailPanel
+   * (TripBrowser).
+   *
+   * For large trips Leaflet will zoom out automatically to fit the polygon;
+   * for small trips maxZoom=14 ensures we don't zoom in past street level.
    */
-  const handleTripMarkerClick = useCallback(
-    (td: TripData, currentZoom: number) => {
-      if (currentZoom <= TRIP_ZOOM_IN_THRESHOLD) {
+  const handleTripPolygonClick = useCallback(
+    (td: TripData) => {
+      if (focusedTrip?.trip.id === td.trip.id) {
+        // Already focused — open the detail panel.
+        setSelectedTrip(td);
+      } else {
+        // Focus the trip and fit the map to its bounding box.
+        setFocusedTrip(td);
         mapRef.current?.fitBounds(
           [
             [td.bounds.minLat, td.bounds.minLon],
             [td.bounds.maxLat, td.bounds.maxLon],
           ],
-          { padding: [40, 40], maxZoom: 13, animate: true }
+          { padding: [40, 40], maxZoom: 14, animate: true }
         );
-      } else {
-        setSelectedTrip(td);
       }
     },
-    []
+    [focusedTrip]
   );
 
   return (
@@ -1154,25 +1181,29 @@ export function MapView({ isActive }: MapViewProps) {
 
         {/* ── Trips mode overlays ───────────────────────────────────────────── */}
         {mapMode === "trips" &&
-          tripDataList.map((td) => (
-            <Polygon
-              key={td.trip.id}
-              positions={td.hull}
-              pathOptions={{
-                color: td.color,
-                fillColor: td.color,
-                fillOpacity: 0.13,
-                weight: 2.5,
-                opacity: 0.75,
-              }}
-              eventHandlers={{ click: () => handleTripClick(td) }}
-            >
-              <Tooltip sticky>{td.trip.name}</Tooltip>
-            </Polygon>
-          ))}
+          tripDataList.map((td) => {
+            const isFocused = focusedTrip?.trip.id === td.trip.id;
+            return (
+              <Polygon
+                key={td.trip.id}
+                positions={td.hull}
+                pathOptions={{
+                  color: td.color,
+                  fillColor: td.color,
+                  fillOpacity: isFocused ? 0.22 : 0.13,
+                  weight: isFocused ? 3 : 2.5,
+                  opacity: isFocused ? 1 : 0.75,
+                }}
+                eventHandlers={{ click: () => handleTripPolygonClick(td) }}
+              >
+                <Tooltip sticky>{td.trip.name}</Tooltip>
+              </Polygon>
+            );
+          })}
 
-        {/* Trip centroid markers (low zoom) — grouped into clusters when nearby */}
+        {/* Trip centroid markers (low zoom) — hidden when a trip is focused */}
         {mapMode === "trips" &&
+          !focusedTrip &&
           zoom < TRIP_DETAIL_ZOOM &&
           tripClusters.map((tc) => (
             <Marker
@@ -1183,8 +1214,29 @@ export function MapView({ isActive }: MapViewProps) {
             />
           ))}
 
-        {/* Individual photo markers at high zoom in trips mode */}
+        {/* Focused trip: individual photo pins (always shown regardless of zoom) */}
         {mapMode === "trips" &&
+          focusedTrip &&
+          visibleFocusedTripClusters?.map((cluster) => {
+            const icon = makeClusterIcon(cluster);
+            const isCluster = cluster.photos.length > 1;
+            return (
+              <Marker
+                key={`focused-${cluster.key}`}
+                position={[cluster.lat, cluster.lon]}
+                icon={icon}
+                eventHandlers={{
+                  click: isCluster
+                    ? () => setSelectedCluster(cluster)
+                    : () => setViewerPhotos([cluster.photos[0]]),
+                }}
+              />
+            );
+          })}
+
+        {/* Individual photo markers at high zoom when no trip is focused */}
+        {mapMode === "trips" &&
+          !focusedTrip &&
           zoom >= TRIP_DETAIL_ZOOM &&
           visibleClusters.map((cluster) => {
             const icon = makeClusterIcon(cluster);
