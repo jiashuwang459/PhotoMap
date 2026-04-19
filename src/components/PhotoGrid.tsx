@@ -6,7 +6,6 @@ import { PhotoViewer } from "./PhotoViewer";
 import type { FilterState } from "./FilterBar";
 import { FilterBar } from "./FilterBar";
 import { useThumbnailWorker } from "../context/ThumbnailWorkerContext";
-import { deleteThumbnail } from "../api/photos";
 
 const PAGE_SIZE = 50;
 
@@ -30,7 +29,7 @@ export function PhotoGrid() {
     toDate: "",
   });
 
-  const { refreshKey } = useThumbnailWorker();
+  const { refreshKey, clearKey } = useThumbnailWorker();
 
   /** Fetch a page of photos according to the current filter. */
   const fetchPage = useCallback(
@@ -74,6 +73,13 @@ export function PhotoGrid() {
     }
   }, [refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /** Auto-reload the first page whenever thumbnails are bulk-cleared. */
+  useEffect(() => {
+    if (clearKey > 0) {
+      void fetchPage(0, true);
+    }
+  }, [clearKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
   function handleApply() {
     void fetchPage(0, true);
   }
@@ -84,23 +90,6 @@ export function PhotoGrid() {
 
   function handleLoadMore() {
     void fetchPage(offset, false);
-  }
-
-  /** When a thumbnail is generated from the viewer, update the cached photo. */
-  function handleThumbnailGenerated(updated: Photo) {
-    setPhotos((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-    setSelectedPhoto(updated);
-  }
-
-  /** When a thumbnail is deleted from a card, update the cached photo. */
-  function handleThumbnailDeleted(updated: Photo) {
-    setPhotos((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-    if (selectedPhoto?.id === updated.id) setSelectedPhoto(updated);
-  }
-
-  async function handleDeleteThumbnail(photo: Photo) {
-    const updated = await deleteThumbnail(photo.id);
-    if (updated) handleThumbnailDeleted(updated);
   }
 
   return (
@@ -139,7 +128,6 @@ export function PhotoGrid() {
             key={p.id}
             photo={p}
             onClick={setSelectedPhoto}
-            onDeleteThumbnail={handleDeleteThumbnail}
           />
         ))}
       </div>
@@ -156,7 +144,6 @@ export function PhotoGrid() {
         <PhotoViewer
           photo={selectedPhoto}
           onClose={() => setSelectedPhoto(null)}
-          onThumbnailGenerated={handleThumbnailGenerated}
         />
       )}
     </div>

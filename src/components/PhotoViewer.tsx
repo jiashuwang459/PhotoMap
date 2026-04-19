@@ -1,6 +1,4 @@
-import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { generateThumbnailForPhoto } from "../api/photos";
 import type { Photo } from "../api/types";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -31,8 +29,6 @@ function basename(path: string): string {
 interface PhotoViewerProps {
   photo: Photo;
   onClose: () => void;
-  /** Called with the updated photo after a thumbnail is successfully generated. */
-  onThumbnailGenerated: (updatedPhoto: Photo) => void;
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -40,40 +36,16 @@ interface PhotoViewerProps {
 /**
  * Full-screen modal for viewing the original image and its metadata.
  *
- * - Shows the original file via Tauri's asset-protocol (`convertFileSrc`).
- * - If no thumbnail exists yet, shows a "Generate thumbnail" button.
- * - If the photo is flagged for review (needs_review), shows a "Retry thumbnail"
- *   button that re-attempts generation ignoring retry limits.
+ * Thumbnail generation is handled exclusively by the background worker
+ * (started from the Scan tab).  This viewer is read-only.
  */
 export function PhotoViewer({
   photo,
   onClose,
-  onThumbnailGenerated,
 }: PhotoViewerProps) {
-  const [generatingThumb, setGeneratingThumb] = useState(false);
-  const [thumbError, setThumbError] = useState<string | null>(null);
-
   // Close on backdrop click (not on content click).
   function handleBackdropClick(e: React.MouseEvent) {
     if (e.target === e.currentTarget) onClose();
-  }
-
-  async function handleGenerateThumbnail() {
-    setGeneratingThumb(true);
-    setThumbError(null);
-    try {
-      const newPath = await generateThumbnailForPhoto(photo.id);
-      onThumbnailGenerated({
-        ...photo,
-        thumbnail_path: newPath,
-        thumbnail_needs_review: false,
-        thumbnail_retry_count: 0,
-      });
-    } catch (e) {
-      setThumbError(String(e));
-    } finally {
-      setGeneratingThumb(false);
-    }
   }
 
   const gps = formatGps(photo.latitude, photo.longitude);
@@ -140,36 +112,14 @@ export function PhotoViewer({
                 "✓ Generated"
               ) : needsReview ? (
                 <span className="photo-viewer-needs-review">
-                  ⚠️ Failed after retries
+                  ⚠️ Failed after retries — use Generate thumbnails in Scan tab
                 </span>
               ) : (
-                "Not generated"
+                "Not generated — use Generate thumbnails in Scan tab"
               )}
             </span>
           </div>
         </div>
-
-        {/* ── Thumbnail actions ── */}
-        {(!hasThumbnail || needsReview) && (
-          <div className="photo-viewer-actions">
-            <button
-              className="btn-primary"
-              onClick={handleGenerateThumbnail}
-              disabled={generatingThumb}
-            >
-              {generatingThumb
-                ? "Generating…"
-                : needsReview
-                ? "Retry thumbnail"
-                : "Generate thumbnail"}
-            </button>
-            {thumbError && (
-              <span className="photo-viewer-error" role="alert">
-                {thumbError}
-              </span>
-            )}
-          </div>
-        )}
       </div>
     </div>
   );

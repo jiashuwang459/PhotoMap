@@ -24,6 +24,7 @@ import {
   listHomeTransitions,
 } from "../api/photos";
 import type { BoundingBox, HomeLocation, HomeTransition, Page, Photo, Trip } from "../api/types";
+import { useThumbnailWorker } from "../context/ThumbnailWorkerContext";
 
 // ── constants ────────────────────────────────────────────────────────────────
 
@@ -724,6 +725,14 @@ function ClusterBrowser({ cluster, onClose }: ClusterBrowserProps) {
   useEffect(() => {
     localPhotosRef.current = localPhotos;
   }, [localPhotos]);
+
+  // When thumbnails are bulk-cleared, reset local photos so stale paths are not shown.
+  const { clearKey } = useThumbnailWorker();
+  useEffect(() => {
+    if (clearKey > 0) {
+      setLocalPhotos((prev) => prev.map((p) => ({ ...p, thumbnail_path: null })));
+    }
+  }, [clearKey]);
 
   // Kick the background thumbnail worker and listen for progress events.
   useEffect(() => {

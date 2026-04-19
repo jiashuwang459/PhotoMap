@@ -48,7 +48,7 @@ export function ScanPanel() {
   const [recentDirs, setRecentDirs] = useState<string[]>(() => loadRecentDirs());
 
   // Thumbnail generation is handled by the global background worker.
-  const { isRunning: thumbRunning, done: thumbDone, total: thumbTotal, status: thumbStatus, start: startThumbnails, cancel: cancelThumbnails } = useThumbnailWorker();
+  const { isRunning: thumbRunning, done: thumbDone, total: thumbTotal, status: thumbStatus, start: startThumbnails, cancel: cancelThumbnails, notifyClear } = useThumbnailWorker();
 
   const thumbPercent = thumbTotal > 0 ? Math.round((thumbDone / thumbTotal) * 100) : 0;
 
@@ -62,6 +62,7 @@ export function ScanPanel() {
     try {
       const count = await clearAllThumbnails();
       setClearCount(count);
+      notifyClear();
     } finally {
       setIsClearing(false);
     }

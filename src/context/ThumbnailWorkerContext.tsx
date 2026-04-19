@@ -61,6 +61,17 @@ export interface ThumbnailWorkerState {
    * photo lists.
    */
   refreshKey: number;
+  /**
+   * Increments each time thumbnails are bulk-cleared.  Components that display
+   * thumbnails should watch this value and re-fetch or reset their local photo
+   * state so stale thumbnail paths are not rendered.
+   */
+  clearKey: number;
+  /**
+   * Call after a successful `clearAllThumbnails()` invocation to notify all
+   * watching components that thumbnail paths are no longer valid.
+   */
+  notifyClear: () => void;
   /** Start (or restart) the background generation worker. */
   start: () => void;
   /** Request cancellation of the running worker. */
@@ -83,6 +94,7 @@ export function ThumbnailWorkerProvider({
   const [total, setTotal] = useState(0);
   const [status, setStatus] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
+  const [clearKey, setClearKey] = useState(0);
 
   // Track whether we're currently running so callbacks close over latest value.
   const isRunningRef = useRef(false);
@@ -156,9 +168,13 @@ export function ThumbnailWorkerProvider({
     void cancelThumbnailWorker();
   }, []);
 
+  const notifyClear = useCallback(() => {
+    setClearKey((k) => k + 1);
+  }, []);
+
   return (
     <ThumbnailWorkerContext.Provider
-      value={{ isRunning, done, total, status, refreshKey, start, cancel }}
+      value={{ isRunning, done, total, status, refreshKey, clearKey, notifyClear, start, cancel }}
     >
       {children}
     </ThumbnailWorkerContext.Provider>

@@ -30,17 +30,10 @@ function basename(path: string): string {
 interface PhotoCardProps {
   photo: Photo;
   onClick?: (photo: Photo) => void;
-  /** Called after the thumbnail for this photo has been successfully deleted. */
-  onDeleteThumbnail?: (photo: Photo) => void;
 }
 
-export function PhotoCard({ photo, onClick, onDeleteThumbnail }: PhotoCardProps) {
+export function PhotoCard({ photo, onClick }: PhotoCardProps) {
   const gps = formatGps(photo.latitude, photo.longitude);
-
-  function handleDeleteThumbnail(e: React.MouseEvent) {
-    e.stopPropagation();
-    onDeleteThumbnail?.(photo);
-  }
 
   return (
     <div
@@ -59,24 +52,12 @@ export function PhotoCard({ photo, onClick, onDeleteThumbnail }: PhotoCardProps)
     >
       <div className="photo-card-thumb" aria-hidden="true">
         {photo.thumbnail_path ? (
-          <>
-            <img
-              className="photo-card-thumb-img"
-              src={convertFileSrc(photo.thumbnail_path)}
-              alt=""
-              loading="lazy"
-            />
-            {onDeleteThumbnail && (
-              <button
-                className="photo-card-thumb-delete"
-                onClick={handleDeleteThumbnail}
-                title="Delete thumbnail"
-                aria-label="Delete thumbnail"
-              >
-                ×
-              </button>
-            )}
-          </>
+          <img
+            className="photo-card-thumb-img"
+            src={convertFileSrc(photo.thumbnail_path)}
+            alt=""
+            loading="lazy"
+          />
         ) : (
           <span className="photo-card-thumb-icon">
             {photo.thumbnail_needs_review ? "⚠️" : "🖼"}
