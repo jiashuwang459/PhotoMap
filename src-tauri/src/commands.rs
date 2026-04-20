@@ -354,8 +354,14 @@ pub fn cmd_query_untripped_photos(
 /// geographic-displacement, and photo-density algorithm.
 ///
 /// A new trip boundary is created whenever two consecutive photos (ordered by
-/// timestamp) are more than `gap_seconds` apart, or when both photos have GPS
-/// coordinates that are more than 500 km apart.
+/// timestamp) have a time gap exceeding the distance-scaled threshold:
+/// `effective_gap = gap_seconds / (1 + dist_km / geo_time_decay_km)`.
+/// At zero distance the full `gap_seconds` window applies; the threshold
+/// shrinks as geographic distance grows so that a short overnight return from
+/// a nearby destination (e.g. Whistler → Seattle, ~100 km) is split even
+/// when the raw time gap is less than `gap_seconds`.  A hard cap
+/// (`geo_split_km`) still forces a split on very large jumps regardless of
+/// the time gap.
 ///
 /// When a home location is stored, clusters whose GPS centroid is within
 /// `min_trip_km` km of home are only kept if their daily photo density
@@ -378,11 +384,12 @@ pub fn cmd_auto_group_trips(
     gap_seconds: i64,
     min_trip_km: f64,
     geo_split_km: f64,
+    geo_time_decay_km: f64,
     home_density_multiplier: f64,
     min_photos: u32,
 ) -> Result<Vec<TripGroupResult>, DbError> {
     let conn = state.0.lock().expect("db mutex poisoned");
-    auto_group_trips(&conn, gap_seconds, min_trip_km, geo_split_km, home_density_multiplier, min_photos)
+    auto_group_trips(&conn, gap_seconds, min_trip_km, geo_split_km, geo_time_decay_km, home_density_multiplier, min_photos)
 }
 
 /// Return the compile-time default values for every [`cmd_auto_group_trips`]

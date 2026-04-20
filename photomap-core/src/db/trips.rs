@@ -5,11 +5,16 @@
 //!
 //! 1. Fetch photos that are not yet assigned to any confirmed trip, ordered by
 //!    timestamp ascending.
-//! 2. Split the sequence wherever the gap between two consecutive photos exceeds
-//!    a caller-supplied threshold (default: 12 hours = 43 200 seconds) **or**
-//!    where two adjacent GPS-tagged photos are more than
-//!    [`GEO_SPLIT_KM`] kilometres apart (default: 500 km), whichever comes
-//!    first.
+//! 2. Split the sequence wherever the **distance-scaled time threshold** is
+//!    exceeded.  The threshold shrinks as the geographic distance between
+//!    consecutive GPS-tagged photos grows:
+//!    `effective_gap = gap_seconds / (1 + dist_km / geo_time_decay_km)`.
+//!    At zero distance the full `gap_seconds` window applies; at
+//!    `geo_time_decay_km` it halves; at larger distances it shrinks further,
+//!    so a 100 km overnight return (e.g. Whistler → Seattle) is split from the
+//!    outbound leg even though the raw time gap would not exceed `gap_seconds`.
+//!    A hard upper-distance cap ([`GEO_SPLIT_KM`], default 500 km) is kept as
+//!    a safety net to catch transcontinental jumps irrespective of time.
 //! 3. Each segment becomes one trip.  The trip name is derived from the date
 //!    range of its photos (e.g. `"Trip 2024-06-01"` for a single-day trip,
 //!    `"Trip 2024-06-01 to 2024-06-05"` for multi-day trips).  If multiple
@@ -282,9 +287,9 @@ pub fn query_untripped_photos(conn: &Connection, page: &Page) -> Result<Vec<Phot
 // Auto-grouping algorithm
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Default gap threshold: 3 days between consecutive photos triggers a new
-/// trip boundary.  With the additional home-distance + density filters, a
-/// long gap is the last-resort boundary rather than the primary split signal.
+/// Default gap threshold: 3 days between consecutive photos (at zero distance)
+/// triggers a new trip boundary.  The effective threshold shrinks as geographic
+/// distance increases — see [`DEFAULT_GEO_TIME_DECAY_KM`].
 pub const DEFAULT_GAP_SECONDS: i64 = 3 * 24 * 3600;
 
 /// Default haversine distance threshold (km) above which two adjacent
@@ -296,6 +301,22 @@ pub const DEFAULT_GEO_SPLIT_KM: f64 = 500.0;
 /// Kept for backwards compatibility with code that references `GEO_SPLIT_KM`
 /// directly.
 pub const GEO_SPLIT_KM: f64 = DEFAULT_GEO_SPLIT_KM;
+
+/// Default distance-decay reference for the distance-scaled time threshold.
+///
+/// The effective time gap threshold is:
+/// `effective_gap = gap_seconds / (1 + dist_km / geo_time_decay_km)`
+///
+/// At `geo_time_decay_km` kilometres of separation the time threshold halves.
+/// At 0 km the full `gap_seconds` window applies.
+///
+/// A value of 25 km means:
+/// * 0 km → 3 days (unchanged)
+/// * 25 km → 1.5 days
+/// * 50 km → 1 day (overnight returns are split)
+/// * 100 km → ~14.4 h  (e.g. a Whistler ↔ Seattle overnight)
+/// * 500 km → ~2.9 h   (domestic-flight segments always split)
+pub const DEFAULT_GEO_TIME_DECAY_KM: f64 = 25.0;
 
 /// Default minimum distance from the inferred home base (km) required for a
 /// cluster to be suggested as a trip.  Clusters whose GPS centroid is closer
@@ -346,6 +367,9 @@ pub struct AutoGroupDefaults {
     pub min_trip_km: f64,
     /// Default geographic split threshold (km).
     pub geo_split_km: f64,
+    /// Default distance-decay reference (km) for the distance-scaled time
+    /// threshold.  The effective gap halves at this distance.
+    pub geo_time_decay_km: f64,
     /// Default home-density multiplier for near-home clusters.
     pub home_density_multiplier: f64,
     /// Default minimum photos-per-cluster threshold.
@@ -360,6 +384,7 @@ pub fn get_auto_group_defaults() -> AutoGroupDefaults {
         gap_seconds: DEFAULT_GAP_SECONDS,
         min_trip_km: DEFAULT_MIN_TRIP_KM,
         geo_split_km: DEFAULT_GEO_SPLIT_KM,
+        geo_time_decay_km: DEFAULT_GEO_TIME_DECAY_KM,
         home_density_multiplier: DEFAULT_HOME_DENSITY_MULTIPLIER,
         min_photos_per_trip: DEFAULT_MIN_PHOTOS_PER_TRIP,
     }
@@ -371,9 +396,14 @@ pub fn get_auto_group_defaults() -> AutoGroupDefaults {
 /// 1. Preserves confirmed trip ranges.
 /// 2. Clears all unconfirmed (suggested) trips.
 /// 3. Loads every photo that has a `timestamp`, ordered ascending.
-/// 4. Splits the sequence wherever two consecutive photos are more than
-///    `gap_seconds` apart **or** both have GPS coordinates that are more than
-///    `geo_split_km` km apart.
+/// 4. Splits the sequence using a **distance-scaled time threshold**:
+///    `effective_gap = gap_seconds / (1 + dist_km / geo_time_decay_km)`
+///    where `dist_km` is the haversine distance between the two consecutive
+///    GPS-tagged photos (0 when either photo lacks coordinates).  This means
+///    a short overnight return from a nearby destination (e.g. 100 km) is
+///    treated as a boundary, while photos at the same campsite across multiple
+///    days remain in one trip.  A hard cap (`geo_split_km`) still forces a
+///    split for very large distances regardless of the time gap.
 /// 5. Drops clusters with fewer than `min_photos` photos (noise filter).
 /// 6. Filters clusters using home-location and density signals:
 ///    - If no home location is stored, all clusters are kept (legacy behaviour).
@@ -400,6 +430,7 @@ pub fn auto_group_trips(
     gap_seconds: i64,
     min_trip_km: f64,
     geo_split_km: f64,
+    geo_time_decay_km: f64,
     home_density_multiplier: f64,
     min_photos: u32,
 ) -> Result<Vec<TripGroupResult>, DbError> {
@@ -478,19 +509,40 @@ pub fn auto_group_trips(
     let mut clusters: Vec<Cluster> = Vec::new();
 
     for row in &photo_rows[1..] {
-        // Primary split: time gap.
-        let time_split = row.timestamp - current.end_ts > gap_seconds;
-
-        // Secondary split: large geographic jump (both photos need GPS).
-        let is_geo_split = match (
+        // Compute haversine distance between the last photo in the current
+        // cluster and the candidate next photo (only when both have GPS).
+        let dist_km = match (
             current.lats.last().copied().zip(current.lons.last().copied()),
             row.latitude.zip(row.longitude),
         ) {
             (Some((prev_lat, prev_lon)), Some((next_lat, next_lon))) => {
-                haversine_km(prev_lat, prev_lon, next_lat, next_lon) > geo_split_km
+                haversine_km(prev_lat, prev_lon, next_lat, next_lon)
             }
-            _ => false,
+            _ => 0.0,
         };
+
+        // Distance-scaled time threshold: the further apart two consecutive
+        // photos are geographically, the shorter the allowed time gap before
+        // they are treated as separate trips.
+        //
+        //   effective_gap = gap_seconds / (1 + dist_km / geo_time_decay_km)
+        //
+        // At 0 km the full base threshold applies.  At geo_time_decay_km the
+        // threshold halves.  geo_time_decay_km = 0 would be a divide-by-zero,
+        // so we fall back to the base threshold in that (degenerate) case.
+        let effective_gap_secs: i64 = if geo_time_decay_km > 0.0 && dist_km > 0.0 {
+            let scaled = gap_seconds as f64 / (1.0 + dist_km / geo_time_decay_km);
+            scaled.round() as i64
+        } else {
+            gap_seconds
+        };
+
+        // Primary split: scaled time gap.
+        let time_split = row.timestamp - current.end_ts > effective_gap_secs;
+
+        // Hard geographic cap: very large jumps always split regardless of
+        // the time gap (safety net for intercontinental/domestic-flight jumps).
+        let is_geo_split = dist_km > 0.0 && dist_km > geo_split_km;
 
         if time_split || is_geo_split {
             clusters.push(std::mem::replace(
@@ -951,7 +1003,7 @@ mod tests {
     fn auto_group_creates_suggested_trips_basic() {
         let conn = mem_db();
         insert(&conn, "/a.jpg", Some(0));
-        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_GEO_TIME_DECAY_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
         let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
         assert!(!trip.is_confirmed, "auto-grouped trips should start as suggested");
     }
@@ -1060,7 +1112,7 @@ mod tests {
         insert(&conn, "/d2b.jpg", Some(3600 + 25_200 + 1800)); // 30 min later → same trip
 
         let gap = 6 * 3600; // 6 hours
-        let results = auto_group_trips(&conn, gap, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
+        let results = auto_group_trips(&conn, gap, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_GEO_TIME_DECAY_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
         assert_eq!(results.len(), 2, "expected exactly 2 trips");
 
         let t1 = get_trip(&conn, results[0].id).unwrap().unwrap();
@@ -1072,7 +1124,7 @@ mod tests {
     #[test]
     fn auto_group_with_no_photos_returns_empty() {
         let conn = mem_db();
-        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_GEO_TIME_DECAY_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
         assert!(results.is_empty());
     }
 
@@ -1082,7 +1134,7 @@ mod tests {
         insert(&conn, "/timed.jpg", Some(1_000_000));
         insert(&conn, "/untimed.jpg", None);
 
-        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_GEO_TIME_DECAY_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
         assert_eq!(results.len(), 1);
         let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
         assert_eq!(trip.photo_count, 1);
@@ -1104,8 +1156,8 @@ mod tests {
         insert(&conn, "/a.jpg", Some(0));
         insert(&conn, "/b.jpg", Some(100));
 
-        let res1 = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
-        let res2 = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
+        let res1 = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_GEO_TIME_DECAY_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
+        let res2 = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_GEO_TIME_DECAY_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
 
         // Same number of trips; old trips are gone.
         assert_eq!(res1.len(), res2.len());
@@ -1119,7 +1171,7 @@ mod tests {
     fn auto_group_single_photo_creates_one_trip() {
         let conn = mem_db();
         insert(&conn, "/solo.jpg", Some(1_700_000_000));
-        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_GEO_TIME_DECAY_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
         assert_eq!(results.len(), 1);
         let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
         assert_eq!(trip.photo_count, 1);
@@ -1135,7 +1187,7 @@ mod tests {
         insert(&conn, "/a.jpg", Some(day));
         insert(&conn, "/b.jpg", Some(day + 8 * 3600));
 
-        let results = auto_group_trips(&conn, 6 * 3600, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
+        let results = auto_group_trips(&conn, 6 * 3600, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_GEO_TIME_DECAY_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
         assert_eq!(results.len(), 2);
         let names: Vec<String> = results
             .iter()
@@ -1157,7 +1209,7 @@ mod tests {
 
         // Gap must be small enough that all 3 end up in the same trip.
         // day3 - (day1 + 3600) = 2*86400 - 3600 = 169200 s < 48*3600 (48h gap)
-        let results = auto_group_trips(&conn, 48 * 3600, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
+        let results = auto_group_trips(&conn, 48 * 3600, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_GEO_TIME_DECAY_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
         assert_eq!(results.len(), 1);
         let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
         assert_eq!(trip.name, "Trip 2024-01-01 to 2024-01-03");
@@ -1167,7 +1219,7 @@ mod tests {
     fn auto_group_creates_suggested_trips() {
         let conn = mem_db();
         insert(&conn, "/a.jpg", Some(0));
-        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
+        let results = auto_group_trips(&conn, DEFAULT_GAP_SECONDS, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_GEO_TIME_DECAY_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
         let trip = get_trip(&conn, results[0].id).unwrap().unwrap();
         assert!(!trip.is_confirmed, "auto-grouped trips should start as suggested");
     }
@@ -1189,7 +1241,7 @@ mod tests {
         insert_gps(&conn, "/tokyo.jpg",  3600, 35.7, 139.7);
 
         // Use a very large gap so only geo-split can separate them.
-        let results = auto_group_trips(&conn, 100 * 3600, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
+        let results = auto_group_trips(&conn, 100 * 3600, 0.0, DEFAULT_GEO_SPLIT_KM, DEFAULT_GEO_TIME_DECAY_KM, DEFAULT_HOME_DENSITY_MULTIPLIER, DEFAULT_MIN_PHOTOS_PER_TRIP).unwrap();
         assert_eq!(results.len(), 2, "geo-split should create 2 trips");
     }
 

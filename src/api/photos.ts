@@ -213,9 +213,13 @@ export async function queryUntrippedPhotos(page: Page): Promise<Photo[]> {
  * Cluster all timestamped photos into trips using a combined temporal-gap,
  * geographic-displacement, and photo-density algorithm.
  *
- * A new trip is created whenever two consecutive photos (by timestamp) are
- * more than `gapSeconds` apart, or when both have GPS coords more than 500 km
- * apart.
+ * A new trip boundary is created whenever the distance-scaled time threshold
+ * is exceeded: `effective_gap = gapSeconds / (1 + dist_km / geoTimeDecayKm)`.
+ * At zero distance the full `gapSeconds` window applies; at `geoTimeDecayKm`
+ * it halves, so a short overnight return from a nearby destination (e.g.
+ * Whistler → Seattle, ~100 km) is split from the outbound leg even when the
+ * raw time gap would not exceed `gapSeconds`.  A hard cap (`geoSplitKm`) still
+ * forces a split for very large jumps.
  *
  * When a home location is stored, clusters whose centroid is within
  * `minTripKm` km of home are only kept if their photo density exceeds the
@@ -225,11 +229,14 @@ export async function queryUntrippedPhotos(page: Page): Promise<Photo[]> {
  * Existing unconfirmed trips are cleared first, making this operation
  * idempotent.  Photos without a timestamp are left ungrouped.
  *
- * @param gapSeconds              Gap threshold in seconds (default: 3 days).
+ * @param gapSeconds              Base time-gap threshold in seconds (at 0 km).
  * @param minTripKm               Min distance from home (km) to always qualify
  *                                as a trip.  Pass 0 to disable.
- * @param geoSplitKm              Geographic jump threshold (km) that forces a
- *                                new trip boundary even within a time gap.
+ * @param geoSplitKm              Hard geographic cap (km) that forces a split
+ *                                regardless of time.
+ * @param geoTimeDecayKm          Distance (km) at which the time threshold
+ *                                halves.  Smaller = more aggressive distance
+ *                                weighting.  Default: 25 km.
  * @param homeDensityMultiplier   Near-home density multiplier.
  * @param minPhotos               Minimum photos per cluster to keep.
  * @returns One {@link TripGroupResult} per newly created trip, including the
@@ -239,6 +246,7 @@ export async function autoGroupTrips(
   gapSeconds: number,
   minTripKm: number,
   geoSplitKm: number,
+  geoTimeDecayKm: number,
   homeDensityMultiplier: number,
   minPhotos: number
 ): Promise<TripGroupResult[]> {
@@ -246,6 +254,7 @@ export async function autoGroupTrips(
     gapSeconds,
     minTripKm,
     geoSplitKm,
+    geoTimeDecayKm,
     homeDensityMultiplier,
     minPhotos,
   });

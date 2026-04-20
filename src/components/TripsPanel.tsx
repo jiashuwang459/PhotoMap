@@ -698,6 +698,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
   const [gapDays, setGapDays] = useState(3);
   const [minTripKm, setMinTripKm] = useState(50);
   const [geoSplitKm, setGeoSplitKm] = useState(500);
+  const [geoTimeDecayKm, setGeoTimeDecayKm] = useState(25);
   const [homeDensityMultiplier, setHomeDensityMultiplier] = useState(3.0);
   const [minPhotos, setMinPhotos] = useState(1);
   const [enableGeocoding, setEnableGeocoding] = useState(true);
@@ -768,6 +769,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
       setGapDays(Math.round(d.gap_seconds / 86400));
       setMinTripKm(d.min_trip_km);
       setGeoSplitKm(d.geo_split_km);
+      setGeoTimeDecayKm(d.geo_time_decay_km);
       setHomeDensityMultiplier(d.home_density_multiplier);
       setMinPhotos(d.min_photos_per_trip);
     }).catch(() => {});
@@ -881,7 +883,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
     geocodingAbortRef.current = false;
     let results: TripGroupResult[] = [];
     try {
-      results = await autoGroupTrips(gapDays * 86400, minTripKm, geoSplitKm, homeDensityMultiplier, minPhotos);
+      results = await autoGroupTrips(gapDays * 86400, minTripKm, geoSplitKm, geoTimeDecayKm, homeDensityMultiplier, minPhotos);
       setTrips([]);
       setOffset(0);
       await loadPageRef.current!(0, []);
@@ -1103,6 +1105,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
                 setGapDays(Math.round(defaults.gap_seconds / 86400));
                 setMinTripKm(defaults.min_trip_km);
                 setGeoSplitKm(defaults.geo_split_km);
+                setGeoTimeDecayKm(defaults.geo_time_decay_km);
                 setHomeDensityMultiplier(defaults.home_density_multiplier);
                 setMinPhotos(defaults.min_photos_per_trip);
               }}
@@ -1166,11 +1169,42 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
                 className="trips-range-slider"
               />
               <p className="trips-param-hint">
-                Two adjacent GPS-tagged photos that are farther apart than
-                this also force a new boundary, regardless of time. At
+                Hard cap: two adjacent GPS-tagged photos farther apart than
+                this always force a new boundary, regardless of time. At
                 500 km the default catches domestic flights. Raise to 2 000+
                 km to only split on intercontinental jumps. Drag to max to
-                disable geographic splitting entirely.
+                disable this hard cap entirely (distance-scaled splitting
+                still applies).
+              </p>
+            </div>
+
+            {/* Distance–time decay slider */}
+            <div className="trips-param-row">
+              <div className="trips-param-label-row">
+                <label htmlFor="geo-time-decay-km-slider" className="trips-param-label-text">
+                  Distance–time sensitivity
+                </label>
+                <span className="trips-param-value">
+                  {geoTimeDecayKm} km
+                </span>
+              </div>
+              <input
+                id="geo-time-decay-km-slider"
+                type="range"
+                min={5}
+                max={500}
+                step={5}
+                value={geoTimeDecayKm}
+                onChange={(e) => setGeoTimeDecayKm(Number(e.target.value))}
+                className="trips-range-slider"
+              />
+              <p className="trips-param-hint">
+                Controls how quickly the time-gap threshold shrinks as
+                geographic distance increases. At this distance the threshold
+                halves; at double this distance it drops to one-third, and so
+                on. Decrease (e.g. 10–25 km) to split short overnight returns
+                like Whistler → Seattle into separate trips. Increase to be
+                more lenient about grouping distant photos together.
               </p>
             </div>
           </div>

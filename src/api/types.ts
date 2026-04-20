@@ -199,6 +199,12 @@ export interface AutoGroupDefaults {
   min_trip_km: number;
   /** Default geographic split threshold (km). */
   geo_split_km: number;
+  /**
+   * Default distance-decay reference (km) for the distance-scaled time
+   * threshold.  The effective gap halves at this distance from the previous
+   * photo.  Smaller values split more aggressively on geographic distance.
+   */
+  geo_time_decay_km: number;
   /** Default density multiplier for near-home cluster inclusion. */
   home_density_multiplier: number;
   /** Default minimum photos-per-cluster threshold. */
