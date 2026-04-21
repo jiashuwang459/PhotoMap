@@ -719,6 +719,23 @@ pub fn auto_group_trips(
             params.push(Box::new(*pid));
         }
         upd.execute(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())))?;
+
+        // Automatically set the cover photo to the first GPS-tagged photo in
+        // the trip (preferred for map display), falling back to the first photo
+        // by timestamp when no GPS-tagged photos are present.
+        conn.execute(
+            "UPDATE trips
+             SET    cover_photo_id = COALESCE(
+                        (SELECT id FROM photos
+                         WHERE  trip_id  = ?1
+                           AND  latitude IS NOT NULL
+                         ORDER  BY timestamp ASC LIMIT 1),
+                        (SELECT id FROM photos
+                         WHERE  trip_id = ?1
+                         ORDER  BY timestamp ASC LIMIT 1))
+             WHERE  id = ?1",
+            rusqlite::params![trip_id],
+        )?;
     }
 
     Ok(results)

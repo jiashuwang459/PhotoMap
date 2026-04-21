@@ -997,6 +997,11 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
   const pendingFocusZoomRef = useRef(false);
   /** True once trip data has been fetched (avoid re-fetching on tab switch). */
   const tripsLoadedRef = useRef(false);
+  /**
+   * Incremented to force trips data to re-fetch even while already in trips
+   * mode (e.g. after external changes or when the user clicks Refresh).
+   */
+  const [tripsFetchVersion, setTripsFetchVersion] = useState(0);
 
   const mapRef = useRef<LeafletMap | null>(null);
 
@@ -1047,15 +1052,28 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
   // ── Invalidate the trips cache whenever the parent signals a change ─────────
   useEffect(() => {
     if (tripsVersion === undefined || tripsVersion === 0) return;
-    // Mark data as stale so the next time the load effect runs it re-fetches.
+    // Mark data as stale and clear the current display.
     tripsLoadedRef.current = false;
     setTripDataList([]);
     setFocusedTrip(null);
     focusZoomRef.current = null;
     pendingFocusZoomRef.current = false;
+    // Immediately trigger a re-fetch (regardless of which mode is active so
+    // the data is ready as soon as the user switches to trips mode).
+    setTripsFetchVersion((v) => v + 1);
   }, [tripsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Load trip data when trips mode is first activated ─────────────────────
+  /** Force a manual refresh of all trip data. */
+  const handleRefreshTrips = useCallback(() => {
+    tripsLoadedRef.current = false;
+    setTripDataList([]);
+    setFocusedTrip(null);
+    focusZoomRef.current = null;
+    pendingFocusZoomRef.current = false;
+    setTripsFetchVersion((v) => v + 1);
+  }, []);
+
+  // ── Load trip data when trips mode is activated or a refresh is requested ──
   useEffect(() => {
     if (mapMode !== "trips" || tripsLoadedRef.current) return;
     tripsLoadedRef.current = true;
@@ -1132,7 +1150,7 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
         setLoadingTrips(false);
       }
     })();
-  }, [mapMode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mapMode, tripsFetchVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleViewportChange = useCallback(
     async (bounds: LatLngBounds, newZoom: number) => {
@@ -1359,6 +1377,25 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
           aria-pressed={useCollisionFilter}
         >
           ⊙
+        </button>
+        <button
+          className="map-mode-btn map-mode-btn--icon"
+          onClick={() => {
+            if (mapMode === "trips") {
+              handleRefreshTrips();
+            } else {
+              // Photos mode: re-trigger viewport query by bumping the version.
+              setViewportVersion((v) => v + 1);
+              if (mapRef.current) {
+                const b = mapRef.current.getBounds();
+                void handleViewportChange(b, mapRef.current.getZoom());
+              }
+            }
+          }}
+          title="Refresh map data"
+          disabled={loading || loadingTrips}
+        >
+          🔄
         </button>
       </div>
 

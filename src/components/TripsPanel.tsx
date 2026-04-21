@@ -263,6 +263,8 @@ function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps)
       const newCover = photoId === coverPhotoId ? null : photoId;
       await setTripCoverPhoto(trip.id, newCover);
       setCoverPhotoId(newCover);
+      // Notify parent so the map view re-fetches the updated cover thumbnail.
+      onTripChanged({ ...trip, cover_photo_id: newCover });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -693,7 +695,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
   const [error, setError] = useState<string | null>(null);
   const [selectedTrip, setSelectedTrip] = useState<Trip | null>(null);
 
-  // Auto-group parameter state (seeded from backend defaults on mount)
+  // Auto-group parameter state (seeded from localStorage, then backend defaults)
   const [defaults, setDefaults] = useState<AutoGroupDefaults | null>(null);
   const [gapDays, setGapDays] = useState(3);
   const [minTripKm, setMinTripKm] = useState(50);
@@ -734,12 +736,40 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
   const [suggesting, setSuggesting] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
 
+  // Ungrouped photos debug section
+  const [showUngrouped, setShowUngrouped] = useState(false);
+  const [ungroupedPhotos, setUngroupedPhotos] = useState<Photo[]>([]);
+  const [ungroupedOffset, setUngroupedOffset] = useState(0);
+  const [ungroupedHasMore, setUngroupedHasMore] = useState(false);
+  const [ungroupedLoading, setUngroupedLoading] = useState(false);
+  const [ungroupedCount, setUngroupedCount] = useState<number | null>(null);
+
   // Keep a stable ref to loadPage so handleAutoGroup can call it after state
   // updates without causing stale-closure issues.
   const loadPageRef = useRef<(pageOffset: number, existing: Trip[]) => Promise<void>>();
 
   // Abort flag: set to true when the user clears suggestions mid-geocoding.
   const geocodingAbortRef = useRef(false);
+
+  // ── localStorage helpers ───────────────────────────────────────────────────
+
+  function lsSave(key: string, value: number | boolean) {
+    try { localStorage.setItem(`pm_ag_${key}`, String(value)); } catch { /* quota */ }
+  }
+  function lsLoadNum(key: string, fallback: number): number {
+    try {
+      const v = localStorage.getItem(`pm_ag_${key}`);
+      if (v !== null) { const n = Number(v); if (isFinite(n)) return n; }
+    } catch { /* ignore */ }
+    return fallback;
+  }
+  function lsLoadBool(key: string, fallback: boolean): boolean {
+    try {
+      const v = localStorage.getItem(`pm_ag_${key}`);
+      if (v !== null) return v === "true";
+    } catch { /* ignore */ }
+    return fallback;
+  }
 
   const loadPage = useCallback(async (pageOffset: number, existing: Trip[]) => {
     setLoading(true);
@@ -763,17 +793,18 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
     loadPage(0, []);
     // Load the stored home location on mount.
     getHomeLocation().then(setHomeLocation).catch(() => {});
-    // Load grouping defaults once so sliders are seeded from Rust constants.
+    // Load grouping defaults from backend, then override with any localStorage values.
     getAutoGroupDefaults().then((d) => {
       setDefaults(d);
-      setGapDays(Math.round(d.gap_seconds / 86400));
-      setMinTripKm(d.min_trip_km);
-      setGeoSplitKm(d.geo_split_km);
-      setGeoTimeDecayKm(d.geo_time_decay_km);
-      setHomeDensityMultiplier(d.home_density_multiplier);
-      setMinPhotos(d.min_photos_per_trip);
+      setGapDays(lsLoadNum("gap_days", Math.round(d.gap_seconds / 86400)));
+      setMinTripKm(lsLoadNum("min_trip_km", d.min_trip_km));
+      setGeoSplitKm(lsLoadNum("geo_split_km", d.geo_split_km));
+      setGeoTimeDecayKm(lsLoadNum("geo_time_decay_km", d.geo_time_decay_km));
+      setHomeDensityMultiplier(lsLoadNum("home_density_multiplier", d.home_density_multiplier));
+      setMinPhotos(lsLoadNum("min_photos", d.min_photos_per_trip));
+      setEnableGeocoding(lsLoadBool("enable_geocoding", true));
     }).catch(() => {});
-  }, [loadPage]);
+  }, [loadPage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleInferHome() {
     setInferringHome(true);
@@ -1031,6 +1062,32 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
     onTripsChanged?.();
   }
 
+  const loadUngroupedPage = useCallback(async (pageOffset: number, existing: Photo[]) => {
+    setUngroupedLoading(true);
+    try {
+      const page: Page = { limit: PAGE_SIZE, offset: pageOffset };
+      const results = await queryUntrippedPhotos(page);
+      const combined = [...existing, ...results];
+      setUngroupedPhotos(combined);
+      setUngroupedOffset(pageOffset + results.length);
+      setUngroupedHasMore(results.length === PAGE_SIZE);
+      if (pageOffset === 0) setUngroupedCount(results.length < PAGE_SIZE ? results.length : null);
+    } catch {
+      // non-fatal
+    } finally {
+      setUngroupedLoading(false);
+    }
+  }, []);
+
+  function handleToggleUngrouped() {
+    if (!showUngrouped) {
+      setUngroupedPhotos([]);
+      setUngroupedOffset(0);
+      void loadUngroupedPage(0, []);
+    }
+    setShowUngrouped((v) => !v);
+  }
+
   const suggested = trips.filter((t) => !t.is_confirmed);
   const confirmed = trips.filter((t) => t.is_confirmed);
 
@@ -1102,12 +1159,18 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
               className="btn-ghost trips-reset-btn"
               onClick={() => {
                 if (!defaults) return;
-                setGapDays(Math.round(defaults.gap_seconds / 86400));
-                setMinTripKm(defaults.min_trip_km);
-                setGeoSplitKm(defaults.geo_split_km);
-                setGeoTimeDecayKm(defaults.geo_time_decay_km);
-                setHomeDensityMultiplier(defaults.home_density_multiplier);
-                setMinPhotos(defaults.min_photos_per_trip);
+                const gd = Math.round(defaults.gap_seconds / 86400);
+                const mk = defaults.min_trip_km;
+                const gs = defaults.geo_split_km;
+                const gt = defaults.geo_time_decay_km;
+                const hd = defaults.home_density_multiplier;
+                const mp = defaults.min_photos_per_trip;
+                setGapDays(gd); lsSave("gap_days", gd);
+                setMinTripKm(mk); lsSave("min_trip_km", mk);
+                setGeoSplitKm(gs); lsSave("geo_split_km", gs);
+                setGeoTimeDecayKm(gt); lsSave("geo_time_decay_km", gt);
+                setHomeDensityMultiplier(hd); lsSave("home_density_multiplier", hd);
+                setMinPhotos(mp); lsSave("min_photos", mp);
               }}
               disabled={!defaults}
               title="Reset all parameters to defaults"
@@ -1137,7 +1200,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
                 max={21}
                 step={1}
                 value={gapDays}
-                onChange={(e) => setGapDays(Number(e.target.value))}
+                onChange={(e) => { const v = Number(e.target.value); setGapDays(v); lsSave("gap_days", v); }}
                 className="trips-range-slider"
               />
               <p className="trips-param-hint">
@@ -1165,7 +1228,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
                 max={10000}
                 step={50}
                 value={geoSplitKm}
-                onChange={(e) => setGeoSplitKm(Number(e.target.value))}
+                onChange={(e) => { const v = Number(e.target.value); setGeoSplitKm(v); lsSave("geo_split_km", v); }}
                 className="trips-range-slider"
               />
               <p className="trips-param-hint">
@@ -1195,7 +1258,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
                 max={500}
                 step={5}
                 value={geoTimeDecayKm}
-                onChange={(e) => setGeoTimeDecayKm(Number(e.target.value))}
+                onChange={(e) => { const v = Number(e.target.value); setGeoTimeDecayKm(v); lsSave("geo_time_decay_km", v); }}
                 className="trips-range-slider"
               />
               <p className="trips-param-hint">
@@ -1229,7 +1292,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
                 max={20}
                 step={1}
                 value={minPhotos}
-                onChange={(e) => setMinPhotos(Number(e.target.value))}
+                onChange={(e) => { const v = Number(e.target.value); setMinPhotos(v); lsSave("min_photos", v); }}
                 className="trips-range-slider"
               />
               <p className="trips-param-hint">
@@ -1244,7 +1307,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
                 <input
                   type="checkbox"
                   checked={enableGeocoding}
-                  onChange={(e) => setEnableGeocoding(e.target.checked)}
+                  onChange={(e) => { setEnableGeocoding(e.target.checked); lsSave("enable_geocoding", e.target.checked); }}
                   className="trips-toggle-checkbox"
                 />
                 <span className="trips-param-label-text">Auto-geocode after grouping</span>
@@ -1348,7 +1411,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
                 max={300}
                 step={5}
                 value={minTripKm}
-                onChange={(e) => setMinTripKm(Number(e.target.value))}
+                onChange={(e) => { const v = Number(e.target.value); setMinTripKm(v); lsSave("min_trip_km", v); }}
                 className="trips-range-slider"
               />
               <p className="trips-param-hint">
@@ -1375,7 +1438,7 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
                 max={10.0}
                 step={0.5}
                 value={homeDensityMultiplier}
-                onChange={(e) => setHomeDensityMultiplier(Number(e.target.value))}
+                onChange={(e) => { const v = Number(e.target.value); setHomeDensityMultiplier(v); lsSave("home_density_multiplier", v); }}
                 className="trips-range-slider"
               />
               <p className="trips-param-hint">
@@ -1716,6 +1779,50 @@ export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) 
       {loading && trips.length === 0 && (
         <p className="trips-loading">Loading trips…</p>
       )}
+
+      {/* ── Ungrouped photos (debug) ── */}
+      <section className="trips-section trips-section--ungrouped">
+        <h3 className="trips-section-title">
+          <button
+            className="btn-ghost trips-ungrouped-toggle"
+            onClick={handleToggleUngrouped}
+            aria-expanded={showUngrouped}
+          >
+            {showUngrouped ? "▾" : "▸"} Ungrouped photos
+          </button>
+          {ungroupedCount !== null && (
+            <span className="trips-section-count">{ungroupedCount}</span>
+          )}
+        </h3>
+        {showUngrouped && (
+          <>
+            {ungroupedLoading && ungroupedPhotos.length === 0 && (
+              <p className="trips-loading">Loading…</p>
+            )}
+            {!ungroupedLoading && ungroupedPhotos.length === 0 && (
+              <p className="trips-hint">No ungrouped photos — all photos belong to a trip.</p>
+            )}
+            {ungroupedPhotos.length > 0 && (
+              <div className="photo-grid trips-ungrouped-grid">
+                {ungroupedPhotos.map((p) => (
+                  <PhotoCard key={p.id} photo={p} />
+                ))}
+              </div>
+            )}
+            {ungroupedHasMore && (
+              <div className="trips-load-more">
+                <button
+                  className="btn-outline"
+                  onClick={() => loadUngroupedPage(ungroupedOffset, ungroupedPhotos)}
+                  disabled={ungroupedLoading}
+                >
+                  {ungroupedLoading ? "Loading…" : "Load more"}
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </section>
     </div>
   );
 }
