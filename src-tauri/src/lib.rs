@@ -21,7 +21,6 @@ use commands::{
     cmd_list_home_transitions, cmd_detect_home_transitions,
     cmd_confirm_home_transition, cmd_dismiss_home_transition,
     cmd_create_home_transition,
-    cmd_get_default_min_trip_km,
     cmd_get_auto_group_defaults,
 };
 use photomap_core::db as core_db;
@@ -117,7 +116,6 @@ pub fn run() {
             cmd_confirm_home_transition,
             cmd_dismiss_home_transition,
             cmd_create_home_transition,
-            cmd_get_default_min_trip_km,
             cmd_get_auto_group_defaults,
         ])
         .run(tauri::generate_context!())

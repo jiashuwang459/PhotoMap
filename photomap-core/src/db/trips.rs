@@ -298,9 +298,6 @@ pub const DEFAULT_GAP_SECONDS: i64 = 3 * 24 * 3600;
 /// border.
 pub const DEFAULT_GEO_SPLIT_KM: f64 = 500.0;
 
-/// Kept for backwards compatibility with code that references `GEO_SPLIT_KM`
-/// directly.
-pub const GEO_SPLIT_KM: f64 = DEFAULT_GEO_SPLIT_KM;
 
 /// Default distance-decay reference for the distance-scaled time threshold.
 ///
@@ -330,8 +327,6 @@ pub const DEFAULT_MIN_TRIP_KM: f64 = 50.0;
 /// outings such as day hikes, festivals, or photo walks near home.
 pub const DEFAULT_HOME_DENSITY_MULTIPLIER: f64 = 3.0;
 
-/// Kept for backwards compatibility.
-pub const HOME_DENSITY_MULTIPLIER: f64 = DEFAULT_HOME_DENSITY_MULTIPLIER;
 
 /// Default minimum number of photos required for a time-cluster to be
 /// suggested as a trip.  The default of 1 means every single photo becomes

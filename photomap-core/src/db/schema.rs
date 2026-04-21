@@ -40,7 +40,6 @@
 ///
 /// All indexes are created with `IF NOT EXISTS` so the migration is safe to
 /// re-run.
-
 pub const CREATE_PHOTOS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS photos (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,

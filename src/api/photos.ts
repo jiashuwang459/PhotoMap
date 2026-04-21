@@ -473,12 +473,3 @@ export async function dismissHomeTransition(id: number): Promise<boolean> {
   return invoke<boolean>("cmd_dismiss_home_transition", { id });
 }
 
-/**
- * Return the default `minTripKm` threshold for {@link autoGroupTrips}.
- *
- * Convenience function so the UI can initialise its slider without
- * hard-coding the backend default value.
- */
-export async function getDefaultMinTripKm(): Promise<number> {
-  return invoke<number>("cmd_get_default_min_trip_km");
-}

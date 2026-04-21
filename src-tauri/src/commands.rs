@@ -551,15 +551,6 @@ pub fn cmd_create_home_transition(
     create_home_transition(&conn, transition_ts, new_lat, new_lon)
 }
 
-/// Return the default `min_trip_km` threshold used by [`cmd_auto_group_trips`].
-///
-/// Convenience constant so the frontend can initialise its slider without
-/// hard-coding the value.
-#[tauri::command]
-pub fn cmd_get_default_min_trip_km() -> f64 {
-    DEFAULT_MIN_TRIP_KM
-}
-
 // ──────────────────────────────────────────────────────────────────────────────
 // Thumbnail commands
 // ──────────────────────────────────────────────────────────────────────────────

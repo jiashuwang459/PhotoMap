@@ -306,7 +306,7 @@ fn parse_exif_datetime(s: &str) -> Option<i64> {
     let minute: i64 = s[14..16].parse().ok()?;
     let second: i64 = s[17..19].parse().ok()?;
 
-    if month < 1 || month > 12 || day < 1 || day > 31 {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
 

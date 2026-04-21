@@ -346,7 +346,7 @@ pub fn detect_home_transitions(conn: &Connection) -> Result<Vec<HomeTransition>,
             entry.2 += p.lon;
         }
 
-        if cell_counts.len() >= 1 {
+        if !cell_counts.is_empty() {
             // Find the most-populated cell.
             if let Some((_, (cnt, lat_sum, lon_sum))) =
                 cell_counts.iter().max_by_key(|(_, v)| v.0)
