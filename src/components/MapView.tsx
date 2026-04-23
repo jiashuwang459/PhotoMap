@@ -1448,6 +1448,9 @@ export function MapView({ isActive, tripsVersion }: MapViewProps) {
         zoom={DEFAULT_ZOOM}
         className="leaflet-map"
         zoomControl={false}
+        zoomSnap={0.25}
+        zoomDelta={0.5}
+        wheelPxPerZoomLevel={120}
         ref={mapRef}
       >
         <TileLayer
