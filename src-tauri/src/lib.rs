@@ -1,0 +1,123 @@
+pub mod commands;
+pub mod db;
+pub mod thumbnail_worker;
+
+use std::sync::Mutex;
+use tauri::Manager;
+
+use commands::{
+    DbState, ThumbnailDirState, ThumbnailJobSender,
+    cmd_upsert_photo, cmd_query_by_time_range, cmd_query_by_bounding_box,
+    cmd_scan_directory, cmd_delete_photo, cmd_query_all_photos, cmd_get_photo_by_path, cmd_get_photo_by_id,
+    cmd_list_trips, cmd_get_trip, cmd_create_trip, cmd_delete_trip,
+    cmd_confirm_trip, cmd_rename_trip, cmd_set_photo_trip, cmd_set_trip_cover_photo,
+    cmd_query_photos_by_trip, cmd_query_untripped_photos, cmd_auto_group_trips,
+    cmd_delete_all_suggested_trips,
+    cmd_generate_thumbnails_batch, cmd_query_photos_needing_review,
+    cmd_generate_thumbnail_for_photo, cmd_suggest_photos_for_trips,
+    cmd_start_thumbnail_worker, cmd_cancel_thumbnail_worker,
+    cmd_delete_thumbnail, cmd_clear_all_thumbnails,
+    cmd_get_home_location, cmd_set_home_location, cmd_infer_home_location,
+    cmd_list_home_transitions, cmd_detect_home_transitions,
+    cmd_confirm_home_transition, cmd_dismiss_home_transition,
+    cmd_create_home_transition,
+    cmd_get_auto_group_defaults,
+};
+use photomap_core::db as core_db;
+use thumbnail_worker::thumbnail_worker_loop;
+
+/// Build and return the Tauri application.
+///
+/// Exposed as a public function so it can be driven from both `main.rs`
+/// (production) and integration tests.
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            // Resolve the application data directory and open (or create) the
+            // SQLite database there.  The path is platform-specific but always
+            // writable by the application.
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .expect("failed to resolve app data directory");
+
+            std::fs::create_dir_all(&data_dir).expect("failed to create app data directory");
+
+            let db_path = data_dir.join("photomap.db");
+            let conn = core_db::open(db_path.to_str().expect("non-UTF-8 db path"))
+                .expect("failed to open database");
+
+            // Thumbnail output directory.
+            let thumbnail_dir = data_dir.join("thumbnails");
+            std::fs::create_dir_all(&thumbnail_dir)
+                .expect("failed to create thumbnails directory");
+
+            // ── Background thumbnail worker ────────────────────────────────────
+            // Open a *second* connection exclusively for the thumbnail worker
+            // thread.  WAL mode (set by `core_db::open`) allows this second
+            // connection to read and write concurrently with the main connection
+            // without long-term lock contention.
+            let bg_conn = core_db::open(db_path.to_str().expect("non-UTF-8 db path"))
+                .expect("failed to open background thumbnail DB connection");
+
+            let bg_thumb_dir = thumbnail_dir.clone();
+            let bg_app = app.handle().clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+
+            std::thread::Builder::new()
+                .name("thumbnail-worker".to_owned())
+                .spawn(move || {
+                    thumbnail_worker_loop(bg_conn, bg_thumb_dir, rx, bg_app);
+                })
+                .expect("failed to spawn thumbnail worker thread");
+
+            app.manage(DbState(Mutex::new(conn)));
+            app.manage(ThumbnailDirState(thumbnail_dir));
+            app.manage(ThumbnailJobSender(Mutex::new(tx)));
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            cmd_upsert_photo,
+            cmd_query_by_time_range,
+            cmd_query_by_bounding_box,
+            cmd_scan_directory,
+            cmd_delete_photo,
+            cmd_query_all_photos,
+            cmd_get_photo_by_path,
+            cmd_get_photo_by_id,
+            cmd_list_trips,
+            cmd_get_trip,
+            cmd_create_trip,
+            cmd_delete_trip,
+            cmd_confirm_trip,
+            cmd_rename_trip,
+            cmd_set_photo_trip,
+            cmd_set_trip_cover_photo,
+            cmd_query_photos_by_trip,
+            cmd_query_untripped_photos,
+            cmd_auto_group_trips,
+            cmd_delete_all_suggested_trips,
+            cmd_generate_thumbnails_batch,
+            cmd_query_photos_needing_review,
+            cmd_generate_thumbnail_for_photo,
+            cmd_suggest_photos_for_trips,
+            cmd_start_thumbnail_worker,
+            cmd_cancel_thumbnail_worker,
+            cmd_delete_thumbnail,
+            cmd_clear_all_thumbnails,
+            cmd_get_home_location,
+            cmd_set_home_location,
+            cmd_infer_home_location,
+            cmd_list_home_transitions,
+            cmd_detect_home_transitions,
+            cmd_confirm_home_transition,
+            cmd_dismiss_home_transition,
+            cmd_create_home_transition,
+            cmd_get_auto_group_defaults,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

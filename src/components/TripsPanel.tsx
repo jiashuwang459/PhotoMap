@@ -1,0 +1,1828 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import {
+  autoGroupTrips,
+  confirmTrip,
+  createTrip,
+  createHomeTransition,
+  deleteAllSuggestedTrips,
+  deleteTrip,
+  detectHomeTransitions,
+  confirmHomeTransition,
+  dismissHomeTransition,
+  getAutoGroupDefaults,
+  getHomeLocation,
+  getTrip,
+  inferHomeLocation,
+  listTrips,
+  queryPhotosByTrip,
+  queryUntrippedPhotos,
+  renameTrip,
+  setHomeLocation as apiSetHomeLocation,
+  setPhotoTrip,
+  setTripCoverPhoto,
+  suggestPhotosForTrips,
+} from "../api/photos";
+import { PhotoCard } from "./PhotoCard";
+import type { AutoGroupDefaults, HomeLocation, HomeTransition, Page, Photo, Trip, TripGroupResult, TripPhotoSuggestion } from "../api/types";
+
+// ── constants ─────────────────────────────────────────────────────────────────
+
+const PAGE_SIZE = 50;
+
+// Rate-limit for Nominatim: 1 request per second per ToS.
+// Using 1100ms provides a safety margin above the 1000ms minimum to
+// account for request processing time and network latency.
+const NOMINATIM_DELAY_MS = 1100;
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+function fmtDate(ts: number | null): string {
+  if (ts === null) return "—";
+  // Timestamps are stored as "camera local time treated as UTC", so display
+  // in UTC to recover the original camera clock reading.
+  return new Date(ts * 1000).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function fmtDateRange(start: number | null, end: number | null): string {
+  if (start === null && end === null) return "No dates";
+  if (start === null) return fmtDate(end);
+  if (end === null || start === end) return fmtDate(start);
+  return `${fmtDate(start)} – ${fmtDate(end)}`;
+}
+
+// ── AddPhotosDrawer — pick untripped photos to add to a trip ──────────────────
+
+interface AddPhotosDrawerProps {
+  tripId: number;
+  onAdded: () => void;
+  onClose: () => void;
+}
+
+function AddPhotosDrawer({ tripId, onAdded, onClose }: AddPhotosDrawerProps) {
+  const [photos, setPhotos] = useState<Photo[]>([]);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadPage = useCallback(async (pageOffset: number, existing: Photo[]) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const page: Page = { limit: PAGE_SIZE, offset: pageOffset };
+      const results = await queryUntrippedPhotos(page);
+      setPhotos([...existing, ...results]);
+      setOffset(pageOffset + results.length);
+      setHasMore(results.length === PAGE_SIZE);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadPage(0, []);
+  }, [loadPage]);
+
+  async function handleAdd(photoId: number) {
+    try {
+      await setPhotoTrip(photoId, tripId);
+      setPhotos((prev) => prev.filter((p) => p.id !== photoId));
+      onAdded();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  return (
+    <div className="add-photos-drawer">
+      <div className="add-photos-header">
+        <h3>Add photos to trip</h3>
+        <button className="btn-ghost" onClick={onClose}>
+          ✕ Close
+        </button>
+      </div>
+
+      {error && (
+        <p className="trips-error" role="alert">
+          {error}
+        </p>
+      )}
+
+      {!loading && photos.length === 0 && !error && (
+        <p className="trips-empty">
+          No un-grouped photos available. All photos are already in a trip.
+        </p>
+      )}
+
+      <div className="add-photos-list">
+        {photos.map((p) => (
+          <div key={p.id} className="add-photos-row">
+            <div className="add-photos-card">
+              <PhotoCard photo={p} />
+            </div>
+            <button
+              className="btn-outline add-photos-add-btn"
+              onClick={() => handleAdd(p.id)}
+            >
+              + Add
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {hasMore && (
+        <div className="trips-load-more">
+          <button
+            className="btn-outline"
+            onClick={() => loadPage(offset, photos)}
+            disabled={loading}
+          >
+            {loading ? "Loading…" : "Load more"}
+          </button>
+        </div>
+      )}
+      {loading && photos.length === 0 && (
+        <p className="trips-loading">Loading photos…</p>
+      )}
+    </div>
+  );
+}
+
+// ── TripDetail — photos inside a single trip ──────────────────────────────────
+
+type TripDetailView = "grid" | "list";
+
+interface TripDetailProps {
+  trip: Trip;
+  onBack: () => void;
+  onDeleted: () => void;
+  onTripChanged: (updatedTrip: Trip) => void;
+}
+
+function TripDetail({ trip, onBack, onDeleted, onTripChanged }: TripDetailProps) {
+  const [photos, setPhotos] = useState<Photo[]>([]);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [showAddPhotos, setShowAddPhotos] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameInput, setNameInput] = useState(trip.name);
+  const [geocoding, setGeocoding] = useState(false);
+  const [viewMode, setViewMode] = useState<TripDetailView>("grid");
+  const [savingName, setSavingName] = useState(false);
+  const [coverPhotoId, setCoverPhotoId] = useState<number | null>(trip.cover_photo_id ?? null);
+  const [settingCover, setSettingCover] = useState(false);
+
+  const loadPage = useCallback(
+    async (pageOffset: number, existing: Photo[]) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const page: Page = { limit: PAGE_SIZE, offset: pageOffset };
+        const results = await queryPhotosByTrip(trip.id, page);
+        setPhotos([...existing, ...results]);
+        setOffset(pageOffset + results.length);
+        setHasMore(results.length === PAGE_SIZE);
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [trip.id]
+  );
+
+  useEffect(() => {
+    setPhotos([]);
+    setOffset(0);
+    loadPage(0, []);
+    setNameInput(trip.name);
+  }, [loadPage, trip.name]);
+
+  async function handleDelete() {
+    if (
+      !confirm(
+        `Delete trip "${trip.name}"?\nPhotos will not be removed from the library.`
+      )
+    ) {
+      return;
+    }
+    setDeleting(true);
+    try {
+      await deleteTrip(trip.id);
+      onDeleted();
+    } catch (e) {
+      setError(String(e));
+      setDeleting(false);
+    }
+  }
+
+  async function handleConfirm() {
+    setConfirming(true);
+    try {
+      await confirmTrip(trip.id);
+      onTripChanged({ ...trip, is_confirmed: true });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  async function handleRemovePhoto(photoId: number) {
+    try {
+      await setPhotoTrip(photoId, null);
+      // If the removed photo was the cover, clear it.
+      if (photoId === coverPhotoId) {
+        await setTripCoverPhoto(trip.id, null);
+        setCoverPhotoId(null);
+      }
+      setPhotos((prev) => prev.filter((p) => p.id !== photoId));
+      // Refresh trip metadata (dates, photo count) from the DB.
+      const updated = await getTrip(trip.id);
+      if (updated) onTripChanged(updated);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleSetCoverPhoto(photoId: number) {
+    setSettingCover(true);
+    try {
+      const newCover = photoId === coverPhotoId ? null : photoId;
+      await setTripCoverPhoto(trip.id, newCover);
+      setCoverPhotoId(newCover);
+      // Notify parent so the map view re-fetches the updated cover thumbnail.
+      onTripChanged({ ...trip, cover_photo_id: newCover });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSettingCover(false);
+    }
+  }
+
+  async function handleSaveName() {
+    const trimmed = nameInput.trim();
+    if (!trimmed || trimmed === trip.name) {
+      setEditingName(false);
+      setNameInput(trip.name);
+      return;
+    }
+    setSavingName(true);
+    try {
+      await renameTrip(trip.id, trimmed);
+      onTripChanged({ ...trip, name: trimmed });
+      setEditingName(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSavingName(false);
+    }
+  }
+
+  async function handleGeocode() {
+    const geoPhotos = photos.filter(
+      (p) => p.latitude !== null && p.longitude !== null
+    );
+    if (geoPhotos.length === 0) {
+      setError("No geotagged photos in this trip to geocode from.");
+      return;
+    }
+    const centLat =
+      geoPhotos.reduce((s, p) => s + p.latitude!, 0) / geoPhotos.length;
+    const centLon =
+      geoPhotos.reduce((s, p) => s + p.longitude!, 0) / geoPhotos.length;
+    setGeocoding(true);
+    setError(null);
+    try {
+      const location = await reverseGeocode(centLat, centLon);
+      if (!location) {
+        setError("Could not determine a location name for this trip.");
+        return;
+      }
+      await renameTrip(trip.id, location);
+      setNameInput(location);
+      onTripChanged({ ...trip, name: location });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setGeocoding(false);
+    }
+  }
+
+  const currentTrip = trip;
+
+  return (
+    <div className="trip-detail">
+      {/* ── Header ── */}
+      <div className="trip-detail-header">
+        <button className="btn-ghost" onClick={onBack}>
+          ← Back
+        </button>
+
+        <div className="trip-detail-title">
+          {editingName ? (
+            <div className="trip-rename-row">
+              <input
+                className="trip-rename-input"
+                value={nameInput}
+                onChange={(e) => setNameInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleSaveName();
+                  if (e.key === "Escape") {
+                    setEditingName(false);
+                    setNameInput(trip.name);
+                  }
+                }}
+                autoFocus
+                disabled={savingName}
+              />
+              <button
+                className="btn-primary"
+                onClick={handleSaveName}
+                disabled={savingName}
+              >
+                {savingName ? "Saving…" : "Save"}
+              </button>
+              <button
+                className="btn-ghost"
+                onClick={() => {
+                  setEditingName(false);
+                  setNameInput(trip.name);
+                }}
+                disabled={savingName}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <h2>
+              {currentTrip.name}
+              <button
+                className="btn-ghost trip-rename-btn"
+                onClick={() => setEditingName(true)}
+                title="Rename trip"
+              >
+                ✏️
+              </button>
+            </h2>
+          )}
+          <span className="trip-detail-meta">
+            {fmtDateRange(currentTrip.start_ts, currentTrip.end_ts)}
+            &nbsp;·&nbsp;
+            {photos.length} photo{photos.length !== 1 ? "s" : ""}
+            {!currentTrip.is_confirmed && (
+              <span className="trip-suggested-badge">Suggested</span>
+            )}
+          </span>
+        </div>
+
+        <div className="trip-detail-actions">
+          {!currentTrip.is_confirmed && (
+            <>
+              <button
+                className="btn-primary"
+                onClick={handleConfirm}
+                disabled={confirming || deleting}
+              >
+                {confirming ? "Accepting…" : "✓ Accept trip"}
+              </button>
+              <button
+                className="btn-danger"
+                onClick={handleDelete}
+                disabled={deleting || confirming}
+              >
+                {deleting ? "Dismissing…" : "✕ Dismiss"}
+              </button>
+            </>
+          )}
+          {currentTrip.is_confirmed && (
+            <button
+              className="btn-danger"
+              onClick={handleDelete}
+              disabled={deleting}
+            >
+              {deleting ? "Deleting…" : "Delete trip"}
+            </button>
+          )}
+          <button
+            className="btn-outline"
+            onClick={() => setShowAddPhotos((v) => !v)}
+          >
+            {showAddPhotos ? "Close picker" : "+ Add photos"}
+          </button>
+          <button
+            className="btn-outline"
+            onClick={handleGeocode}
+            disabled={geocoding || photos.filter((p) => p.latitude !== null).length === 0}
+            title="Reverse-geocode this trip's centroid and rename it"
+          >
+            {geocoding ? "Geocoding…" : "📍 Geocode"}
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <p className="trips-error" role="alert">
+          {error}
+        </p>
+      )}
+
+      {/* ── Add-photos drawer ── */}
+      {showAddPhotos && (
+        <AddPhotosDrawer
+          tripId={trip.id}
+          onAdded={async () => {
+            setPhotos([]);
+            setOffset(0);
+            loadPage(0, []);
+            // Refresh trip metadata (dates, photo count) from the DB.
+            const updated = await getTrip(trip.id);
+            if (updated) onTripChanged(updated);
+          }}
+          onClose={() => setShowAddPhotos(false)}
+        />
+      )}
+
+      {photos.length === 0 && !loading && !error && (
+        <p className="trips-empty">No photos in this trip yet.</p>
+      )}
+
+      {/* ── View mode toggle ── */}
+      {photos.length > 0 && (
+        <div className="trip-view-toggle">
+          <button
+            className={`trip-view-btn${viewMode === "grid" ? " trip-view-btn--active" : ""}`}
+            onClick={() => setViewMode("grid")}
+            title="Grid view"
+            aria-pressed={viewMode === "grid"}
+          >
+            ⊞ Grid
+          </button>
+          <button
+            className={`trip-view-btn${viewMode === "list" ? " trip-view-btn--active" : ""}`}
+            onClick={() => setViewMode("list")}
+            title="List view"
+            aria-pressed={viewMode === "list"}
+          >
+            ☰ List
+          </button>
+        </div>
+      )}
+
+      {/* ── Grid view ── */}
+      {viewMode === "grid" && (
+        <div className="photo-grid trip-photo-grid">
+          {photos.map((p) => (
+            <div
+              key={p.id}
+              className={`trip-photo-item${p.id === coverPhotoId ? " trip-photo-item--cover" : ""}`}
+            >
+              <PhotoCard photo={p} />
+              {p.id === coverPhotoId && (
+                <span className="trip-cover-badge" title="Cover photo">★</span>
+              )}
+              <button
+                className="trip-cover-btn"
+                onClick={() => handleSetCoverPhoto(p.id)}
+                disabled={settingCover}
+                title={p.id === coverPhotoId ? "Clear cover photo" : "Set as cover photo"}
+              >
+                {p.id === coverPhotoId ? "★" : "☆"}
+              </button>
+              <button
+                className="trip-photo-remove"
+                onClick={() => handleRemovePhoto(p.id)}
+                title="Remove from trip"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── List view ── */}
+      {viewMode === "list" && (
+        <div className="trip-photo-list">
+          {photos.map((p) => (
+            <div key={p.id} className={`trip-photo-list-row${p.id === coverPhotoId ? " trip-photo-list-row--cover" : ""}`}>
+              <div className="trip-photo-list-thumb">
+                {p.thumbnail_path ? (
+                  <img
+                    src={convertFileSrc(p.thumbnail_path)}
+                    alt=""
+                    className="trip-photo-list-img"
+                  />
+                ) : (
+                  <span className="trip-photo-list-icon">🖼</span>
+                )}
+              </div>
+              <div className="trip-photo-list-info">
+                <span className="trip-photo-list-name">
+                  {p.file_path.split(/[\\/]/).pop() ?? p.file_path}
+                </span>
+                <span className="trip-photo-list-date">
+                  {p.timestamp !== null
+                    ? new Date(p.timestamp * 1000).toLocaleString(undefined, {
+                        year: "numeric",
+                        month: "short",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        timeZone: "UTC",
+                      })
+                    : "No date"}
+                </span>
+                {p.latitude !== null && p.longitude !== null && (
+                  <span className="trip-photo-list-gps">
+                    📍 {p.latitude.toFixed(4)}°, {p.longitude.toFixed(4)}°
+                  </span>
+                )}
+              </div>
+              <button
+                className={`btn-ghost trip-cover-list-btn${p.id === coverPhotoId ? " trip-cover-list-btn--active" : ""}`}
+                onClick={() => handleSetCoverPhoto(p.id)}
+                disabled={settingCover}
+                title={p.id === coverPhotoId ? "Clear cover photo" : "Set as cover photo"}
+              >
+                {p.id === coverPhotoId ? "★" : "☆"}
+              </button>
+              <button
+                className="btn-ghost trip-photo-list-remove"
+                onClick={() => handleRemovePhoto(p.id)}
+                title="Remove from trip"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {hasMore && (
+        <div className="trips-load-more">
+          <button
+            className="btn-outline"
+            onClick={() => loadPage(offset, photos)}
+            disabled={loading}
+          >
+            {loading ? "Loading…" : "Load more"}
+          </button>
+        </div>
+      )}
+      {loading && photos.length === 0 && (
+        <p className="trips-loading">Loading photos…</p>
+      )}
+    </div>
+  );
+}
+
+// ── TripCard — summary card for a single trip ─────────────────────────────────
+
+interface TripCardProps {
+  trip: Trip;
+  onSelect: (trip: Trip) => void;
+  onDismiss?: (trip: Trip) => void;
+}
+
+function TripCard({ trip, onSelect, onDismiss }: TripCardProps) {
+  return (
+    <div className="trip-card-wrapper">
+      <button className="trip-card" onClick={() => onSelect(trip)}>
+        <span className="trip-card-icon" aria-hidden="true">
+          🗺️
+        </span>
+        <div className="trip-card-body">
+          <div className="trip-card-name-row">
+            <span className="trip-card-name">{trip.name}</span>
+            {!trip.is_confirmed && (
+              <span className="trip-suggested-badge trip-suggested-badge--sm">
+                Suggested
+              </span>
+            )}
+          </div>
+          <span className="trip-card-dates">
+            {fmtDateRange(trip.start_ts, trip.end_ts)}
+          </span>
+          <span className="trip-card-count">
+            {trip.photo_count} photo{trip.photo_count !== 1 ? "s" : ""}
+          </span>
+        </div>
+        <span className="trip-card-arrow" aria-hidden="true">
+          ›
+        </span>
+      </button>
+      {onDismiss && (
+        <button
+          className="trip-card-dismiss"
+          title="Dismiss suggestion"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDismiss(trip);
+          }}
+          aria-label={`Dismiss suggestion "${trip.name}"`}
+        >
+          ✕
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── TripsPanel — main panel ───────────────────────────────────────────────────
+
+/** Sleep for `ms` milliseconds. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Reverse-geocode a single (lat, lon) pair via Nominatim and return a
+ * human-readable location label (e.g. "Tokyo" or "Paris, Île-de-France").
+ * Returns `null` on any failure so callers can fall back to a date name.
+ */
+async function reverseGeocode(lat: number, lon: number): Promise<string | null> {
+  try {
+    const url =
+      `https://nominatim.openstreetmap.org/reverse` +
+      `?format=jsonv2&lat=${lat}&lon=${lon}&zoom=10&addressdetails=1`;
+    const res = await fetch(url, {
+      headers: { "Accept-Language": "en", "User-Agent": "PhotoMap/0.1" },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      address?: {
+        city?: string;
+        town?: string;
+        village?: string;
+        county?: string;
+        state?: string;
+        country?: string;
+      };
+    };
+    const a = data.address ?? {};
+    const place = a.city ?? a.town ?? a.village ?? a.county;
+    const region = a.state ?? a.country;
+    if (place && region) return `${place}, ${region}`;
+    if (place) return place;
+    if (region) return region;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function TripsPanel({ onTripsChanged }: { onTripsChanged?: () => void }) {
+  const [trips, setTrips] = useState<Trip[]>([]);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [grouping, setGrouping] = useState(false);
+  const [geocodingStatus, setGeocodingStatus] = useState<string | null>(null);
+  const [clearingAll, setClearingAll] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedTrip, setSelectedTrip] = useState<Trip | null>(null);
+
+  // Auto-group parameter state (seeded from localStorage, then backend defaults)
+  const [defaults, setDefaults] = useState<AutoGroupDefaults | null>(null);
+  const [gapDays, setGapDays] = useState(3);
+  const [minTripKm, setMinTripKm] = useState(50);
+  const [geoSplitKm, setGeoSplitKm] = useState(500);
+  const [geoTimeDecayKm, setGeoTimeDecayKm] = useState(25);
+  const [homeDensityMultiplier, setHomeDensityMultiplier] = useState(3.0);
+  const [minPhotos, setMinPhotos] = useState(1);
+  const [enableGeocoding, setEnableGeocoding] = useState(true);
+  const [showGroupParams, setShowGroupParams] = useState(false);
+
+  // Home location state
+  const [homeLocation, setHomeLocation] = useState<HomeLocation | null>(null);
+  const [inferringHome, setInferringHome] = useState(false);
+  // Manual home form
+  const [showManualHomeForm, setShowManualHomeForm] = useState(false);
+  const [manualLat, setManualLat] = useState("");
+  const [manualLon, setManualLon] = useState("");
+  const [settingHome, setSettingHome] = useState(false);
+
+  // Move events (home transitions) state
+  const [transitions, setTransitions] = useState<HomeTransition[]>([]);
+  const [detectingMoves, setDetectingMoves] = useState(false);
+  const [showMoveEvents, setShowMoveEvents] = useState(false);
+  // Manual transition form
+  const [showAddTransitionForm, setShowAddTransitionForm] = useState(false);
+  const [newTransitionDate, setNewTransitionDate] = useState("");
+  const [newTransitionLat, setNewTransitionLat] = useState("");
+  const [newTransitionLon, setNewTransitionLon] = useState("");
+  const [addingTransition, setAddingTransition] = useState(false);
+
+  // New-trip form state
+  const [showNewTripForm, setShowNewTripForm] = useState(false);
+  const [newTripName, setNewTripName] = useState("");
+  const [creatingTrip, setCreatingTrip] = useState(false);
+
+  // Photo suggestions state
+  const [suggestions, setSuggestions] = useState<TripPhotoSuggestion[]>([]);
+  const [suggesting, setSuggesting] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+
+  // Ungrouped photos debug section
+  const [showUngrouped, setShowUngrouped] = useState(false);
+  const [ungroupedPhotos, setUngroupedPhotos] = useState<Photo[]>([]);
+  const [ungroupedOffset, setUngroupedOffset] = useState(0);
+  const [ungroupedHasMore, setUngroupedHasMore] = useState(false);
+  const [ungroupedLoading, setUngroupedLoading] = useState(false);
+  const [ungroupedCount, setUngroupedCount] = useState<number | null>(null);
+
+  // Keep a stable ref to loadPage so handleAutoGroup can call it after state
+  // updates without causing stale-closure issues.
+  const loadPageRef = useRef<(pageOffset: number, existing: Trip[]) => Promise<void>>();
+
+  // Abort flag: set to true when the user clears suggestions mid-geocoding.
+  const geocodingAbortRef = useRef(false);
+
+  // ── localStorage helpers ───────────────────────────────────────────────────
+
+  function lsSave(key: string, value: number | boolean) {
+    try { localStorage.setItem(`pm_ag_${key}`, String(value)); } catch { /* quota */ }
+  }
+  function lsLoadNum(key: string, fallback: number): number {
+    try {
+      const v = localStorage.getItem(`pm_ag_${key}`);
+      if (v !== null) { const n = Number(v); if (isFinite(n)) return n; }
+    } catch { /* ignore */ }
+    return fallback;
+  }
+  function lsLoadBool(key: string, fallback: boolean): boolean {
+    try {
+      const v = localStorage.getItem(`pm_ag_${key}`);
+      if (v !== null) return v === "true";
+    } catch { /* ignore */ }
+    return fallback;
+  }
+
+  const loadPage = useCallback(async (pageOffset: number, existing: Trip[]) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const page: Page = { limit: PAGE_SIZE, offset: pageOffset };
+      const results = await listTrips(page);
+      setTrips([...existing, ...results]);
+      setOffset(pageOffset + results.length);
+      setHasMore(results.length === PAGE_SIZE);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  loadPageRef.current = loadPage;
+
+  useEffect(() => {
+    loadPage(0, []);
+    // Load the stored home location on mount.
+    getHomeLocation().then(setHomeLocation).catch(() => {});
+    // Load grouping defaults from backend, then override with any localStorage values.
+    getAutoGroupDefaults().then((d) => {
+      setDefaults(d);
+      setGapDays(lsLoadNum("gap_days", Math.round(d.gap_seconds / 86400)));
+      setMinTripKm(lsLoadNum("min_trip_km", d.min_trip_km));
+      setGeoSplitKm(lsLoadNum("geo_split_km", d.geo_split_km));
+      setGeoTimeDecayKm(lsLoadNum("geo_time_decay_km", d.geo_time_decay_km));
+      setHomeDensityMultiplier(lsLoadNum("home_density_multiplier", d.home_density_multiplier));
+      setMinPhotos(lsLoadNum("min_photos", d.min_photos_per_trip));
+      setEnableGeocoding(lsLoadBool("enable_geocoding", true));
+    }).catch(() => {});
+  }, [loadPage]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function handleInferHome() {
+    setInferringHome(true);
+    setError(null);
+    try {
+      const result = await inferHomeLocation();
+      setHomeLocation(result);
+      if (!result) {
+        setError("Not enough GPS-tagged photos to infer a home location (need at least 5).");
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setInferringHome(false);
+    }
+  }
+
+  async function handleDetectMoves() {
+    setDetectingMoves(true);
+    setError(null);
+    try {
+      const result = await detectHomeTransitions();
+      setTransitions(result);
+      setShowMoveEvents(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDetectingMoves(false);
+    }
+  }
+
+  async function handleConfirmTransition(id: number) {
+    try {
+      await confirmHomeTransition(id);
+      setTransitions((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, is_confirmed: true } : t))
+      );
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleDismissTransition(id: number) {
+    try {
+      await dismissHomeTransition(id);
+      setTransitions((prev) => prev.filter((t) => t.id !== id));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleSetManualHome() {
+    const lat = parseFloat(manualLat);
+    const lon = parseFloat(manualLon);
+    if (isNaN(lat) || isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      setError("Invalid coordinates. Latitude must be −90 to 90, longitude −180 to 180.");
+      return;
+    }
+    setSettingHome(true);
+    setError(null);
+    try {
+      await apiSetHomeLocation(lat, lon);
+      setHomeLocation({ lat, lon });
+      setShowManualHomeForm(false);
+      setManualLat("");
+      setManualLon("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSettingHome(false);
+    }
+  }
+
+  async function handleAddTransition() {
+    const lat = parseFloat(newTransitionLat);
+    const lon = parseFloat(newTransitionLon);
+    if (isNaN(lat) || isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      setError("Invalid coordinates. Latitude must be −90 to 90, longitude −180 to 180.");
+      return;
+    }
+    if (!newTransitionDate) {
+      setError("Please choose a date.");
+      return;
+    }
+    const ts = Math.floor(new Date(newTransitionDate + "T00:00:00Z").getTime() / 1000);
+    setAddingTransition(true);
+    setError(null);
+    try {
+      const created = await createHomeTransition(ts, lat, lon);
+      setTransitions((prev) => [...prev, created].sort((a, b) => a.transition_ts - b.transition_ts));
+      setShowAddTransitionForm(false);
+      setNewTransitionDate("");
+      setNewTransitionLat("");
+      setNewTransitionLon("");
+      setShowMoveEvents(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAddingTransition(false);
+    }
+  }
+
+  async function handleAutoGroup() {
+    setGrouping(true);
+    setGeocodingStatus(null);
+    setError(null);
+    geocodingAbortRef.current = false;
+    let results: TripGroupResult[] = [];
+    try {
+      results = await autoGroupTrips(gapDays * 86400, minTripKm, geoSplitKm, geoTimeDecayKm, homeDensityMultiplier, minPhotos);
+      setTrips([]);
+      setOffset(0);
+      await loadPageRef.current!(0, []);
+    } catch (e) {
+      setError(String(e));
+      setGrouping(false);
+      return;
+    }
+
+    setGrouping(false);
+
+    // ── Location-based naming via Nominatim ────────────────────────────────
+    // Only geocode when the user has enabled it, and only trips with a centroid.
+    if (!enableGeocoding) return;
+    const withGps = results.filter(
+      (r) => r.centroid_lat !== null && r.centroid_lon !== null
+    );
+    if (withGps.length === 0) return;
+
+    setGeocodingStatus(`Geocoding 0 / ${withGps.length}…`);
+    let done = 0;
+    for (const result of withGps) {
+      // Stop geocoding if the user cleared suggestions while we were running.
+      if (geocodingAbortRef.current) {
+        setGeocodingStatus(null);
+        return;
+      }
+      const location = await reverseGeocode(
+        result.centroid_lat!,
+        result.centroid_lon!
+      );
+      done++;
+      setGeocodingStatus(`Geocoding ${done} / ${withGps.length}…`);
+      if (location) {
+        try {
+          await renameTrip(result.id, location);
+        } catch {
+          // Non-fatal: keep the date name.
+        }
+      }
+      if (done < withGps.length) {
+        await sleep(NOMINATIM_DELAY_MS);
+      }
+    }
+    setGeocodingStatus(null);
+    // Refresh trip list so renamed trips are visible.
+    setTrips([]);
+    setOffset(0);
+    await loadPageRef.current!(0, []);
+    onTripsChanged?.();
+  }
+
+  async function handleSuggestPhotos() {
+    setSuggesting(true);
+    setError(null);
+    try {
+      const result = await suggestPhotosForTrips();
+      setSuggestions(result);
+      setShowSuggestions(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSuggesting(false);
+    }
+  }
+
+  async function handleAcceptSuggestion(tripId: number, photoIds: number[]) {
+    try {
+      await Promise.all(photoIds.map((pid) => setPhotoTrip(pid, tripId)));
+      setSuggestions((prev) => prev.filter((s) => s.trip_id !== tripId));
+      // Refresh trip list so photo counts update.
+      setTrips([]);
+      setOffset(0);
+      await loadPage(0, []);
+      onTripsChanged?.();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  function handleDismissSuggestion(tripId: number) {
+    setSuggestions((prev) => prev.filter((s) => s.trip_id !== tripId));
+  }
+
+  async function handleDismissSuggestedTrip(trip: Trip) {
+    try {
+      await deleteTrip(trip.id);
+      setTrips((prev) => prev.filter((t) => t.id !== trip.id));
+      onTripsChanged?.();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleClearAllSuggestions() {
+    // Signal the geocoding loop (if running) to stop before clearing trips.
+    geocodingAbortRef.current = true;
+    setGeocodingStatus(null);
+    setClearingAll(true);
+    setError(null);
+    try {
+      await deleteAllSuggestedTrips();
+      setTrips([]);
+      setOffset(0);
+      await loadPage(0, []);
+      onTripsChanged?.();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setClearingAll(false);
+    }
+  }
+
+  async function handleCreateTrip() {
+    const trimmed = newTripName.trim();
+    if (!trimmed) return;
+    setCreatingTrip(true);
+    setError(null);
+    try {
+      await createTrip(trimmed, null, null, true);
+      setNewTripName("");
+      setShowNewTripForm(false);
+      setTrips([]);
+      setOffset(0);
+      await loadPage(0, []);
+      onTripsChanged?.();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setCreatingTrip(false);
+    }
+  }
+
+  function handleTripDeleted() {
+    setSelectedTrip(null);
+    setTrips([]);
+    setOffset(0);
+    loadPage(0, []);
+    onTripsChanged?.();
+  }
+
+  function handleTripChanged(updated: Trip) {
+    setSelectedTrip(updated);
+    setTrips((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+    onTripsChanged?.();
+  }
+
+  const loadUngroupedPage = useCallback(async (pageOffset: number, existing: Photo[]) => {
+    setUngroupedLoading(true);
+    try {
+      const page: Page = { limit: PAGE_SIZE, offset: pageOffset };
+      const results = await queryUntrippedPhotos(page);
+      const combined = [...existing, ...results];
+      setUngroupedPhotos(combined);
+      setUngroupedOffset(pageOffset + results.length);
+      setUngroupedHasMore(results.length === PAGE_SIZE);
+      if (pageOffset === 0) setUngroupedCount(results.length < PAGE_SIZE ? results.length : null);
+    } catch {
+      // non-fatal
+    } finally {
+      setUngroupedLoading(false);
+    }
+  }, []);
+
+  function handleToggleUngrouped() {
+    if (!showUngrouped) {
+      setUngroupedPhotos([]);
+      setUngroupedOffset(0);
+      void loadUngroupedPage(0, []);
+    }
+    setShowUngrouped((v) => !v);
+  }
+
+  const suggested = trips.filter((t) => !t.is_confirmed);
+  const confirmed = trips.filter((t) => t.is_confirmed);
+
+  // ── detail view ────────────────────────────────────────────────────────────
+  if (selectedTrip !== null) {
+    return (
+      <TripDetail
+        trip={selectedTrip}
+        onBack={() => setSelectedTrip(null)}
+        onDeleted={handleTripDeleted}
+        onTripChanged={handleTripChanged}
+      />
+    );
+  }
+
+  // ── list view ──────────────────────────────────────────────────────────────
+  return (
+    <div className="trips-panel">
+      <div className="trips-toolbar">
+        <div>
+          <h2>Trips</h2>
+          <p className="trips-hint">
+            Photos are grouped into trips based on time gaps, geographic
+            displacement from home, and photo density. Confirmed trips are
+            preserved when re-grouping; only new suggestions are added.
+          </p>
+        </div>
+        <div className="trips-toolbar-actions">
+          <button
+            className="btn-primary"
+            onClick={handleAutoGroup}
+            disabled={grouping || loading}
+          >
+            {grouping ? "Grouping…" : "Auto-group trips"}
+          </button>
+          <button
+            className="btn-outline"
+            onClick={() => setShowGroupParams((v) => !v)}
+            title="Configure grouping parameters"
+          >
+            ⚙ Settings
+          </button>
+          <button
+            className="btn-outline"
+            onClick={showSuggestions ? () => setShowSuggestions(false) : handleSuggestPhotos}
+            disabled={suggesting || loading || confirmed.length === 0}
+            title={confirmed.length === 0 ? "Accept some trips first to enable suggestions" : ""}
+          >
+            {suggesting ? "Finding…" : showSuggestions ? "Hide suggestions" : "Suggest photos"}
+          </button>
+          <button
+            className="btn-outline"
+            onClick={() => {
+              setShowNewTripForm((v) => !v);
+              setNewTripName("");
+            }}
+          >
+            {showNewTripForm ? "Cancel" : "+ New trip"}
+          </button>
+        </div>
+      </div>
+
+      {/* ── Grouping parameters panel ── */}
+      {showGroupParams && (
+        <div className="trips-group-params">
+          <div className="trips-group-params-header">
+            <h3>Auto-group settings</h3>
+            <button
+              className="btn-ghost trips-reset-btn"
+              onClick={() => {
+                if (!defaults) return;
+                const gd = Math.round(defaults.gap_seconds / 86400);
+                const mk = defaults.min_trip_km;
+                const gs = defaults.geo_split_km;
+                const gt = defaults.geo_time_decay_km;
+                const hd = defaults.home_density_multiplier;
+                const mp = defaults.min_photos_per_trip;
+                setGapDays(gd); lsSave("gap_days", gd);
+                setMinTripKm(mk); lsSave("min_trip_km", mk);
+                setGeoSplitKm(gs); lsSave("geo_split_km", gs);
+                setGeoTimeDecayKm(gt); lsSave("geo_time_decay_km", gt);
+                setHomeDensityMultiplier(hd); lsSave("home_density_multiplier", hd);
+                setMinPhotos(mp); lsSave("min_photos", mp);
+              }}
+              disabled={!defaults}
+              title="Reset all parameters to defaults"
+            >
+              ↺ Reset to defaults
+            </button>
+          </div>
+
+          {/* ── Section: Trip boundary splitting ── */}
+          <div className="trips-settings-section">
+            <h4 className="trips-settings-section-title">Trip boundaries</h4>
+
+            {/* Time gap slider */}
+            <div className="trips-param-row">
+              <div className="trips-param-label-row">
+                <label htmlFor="gap-days-slider" className="trips-param-label-text">
+                  Time gap
+                </label>
+                <span className="trips-param-value">
+                  {gapDays === 1 ? "1 day" : `${gapDays} days`}
+                </span>
+              </div>
+              <input
+                id="gap-days-slider"
+                type="range"
+                min={1}
+                max={21}
+                step={1}
+                value={gapDays}
+                onChange={(e) => { const v = Number(e.target.value); setGapDays(v); lsSave("gap_days", v); }}
+                className="trips-range-slider"
+              />
+              <p className="trips-param-hint">
+                A gap of this length (or longer) between consecutive photos
+                forces a new trip boundary. Increase for long road trips or
+                infrequent shooters; decrease to split dense travel days
+                into separate trips.
+              </p>
+            </div>
+
+            {/* Geographic split slider */}
+            <div className="trips-param-row">
+              <div className="trips-param-label-row">
+                <label htmlFor="geo-split-km-slider" className="trips-param-label-text">
+                  Geographic jump threshold
+                </label>
+                <span className="trips-param-value">
+                  {geoSplitKm >= 10000 ? "disabled" : `${geoSplitKm} km`}
+                </span>
+              </div>
+              <input
+                id="geo-split-km-slider"
+                type="range"
+                min={50}
+                max={10000}
+                step={50}
+                value={geoSplitKm}
+                onChange={(e) => { const v = Number(e.target.value); setGeoSplitKm(v); lsSave("geo_split_km", v); }}
+                className="trips-range-slider"
+              />
+              <p className="trips-param-hint">
+                Hard cap: two adjacent GPS-tagged photos farther apart than
+                this always force a new boundary, regardless of time. At
+                500 km the default catches domestic flights. Raise to 2 000+
+                km to only split on intercontinental jumps. Drag to max to
+                disable this hard cap entirely (distance-scaled splitting
+                still applies).
+              </p>
+            </div>
+
+            {/* Distance–time decay slider */}
+            <div className="trips-param-row">
+              <div className="trips-param-label-row">
+                <label htmlFor="geo-time-decay-km-slider" className="trips-param-label-text">
+                  Distance–time sensitivity
+                </label>
+                <span className="trips-param-value">
+                  {geoTimeDecayKm} km
+                </span>
+              </div>
+              <input
+                id="geo-time-decay-km-slider"
+                type="range"
+                min={5}
+                max={500}
+                step={5}
+                value={geoTimeDecayKm}
+                onChange={(e) => { const v = Number(e.target.value); setGeoTimeDecayKm(v); lsSave("geo_time_decay_km", v); }}
+                className="trips-range-slider"
+              />
+              <p className="trips-param-hint">
+                Controls how quickly the time-gap threshold shrinks as
+                geographic distance increases. At this distance the threshold
+                halves; at double this distance it drops to one-third, and so
+                on. Decrease (e.g. 10–25 km) to split short overnight returns
+                like Whistler → Seattle into separate trips. Increase to be
+                more lenient about grouping distant photos together.
+              </p>
+            </div>
+          </div>
+
+          {/* ── Section: Noise filter ── */}
+          <div className="trips-settings-section">
+            <h4 className="trips-settings-section-title">Noise filter</h4>
+
+            <div className="trips-param-row">
+              <div className="trips-param-label-row">
+                <label htmlFor="min-photos-slider" className="trips-param-label-text">
+                  Min photos per trip
+                </label>
+                <span className="trips-param-value">
+                  {minPhotos === 1 ? "1 (off)" : String(minPhotos)}
+                </span>
+              </div>
+              <input
+                id="min-photos-slider"
+                type="range"
+                min={1}
+                max={20}
+                step={1}
+                value={minPhotos}
+                onChange={(e) => { const v = Number(e.target.value); setMinPhotos(v); lsSave("min_photos", v); }}
+                className="trips-range-slider"
+              />
+              <p className="trips-param-hint">
+                Clusters with fewer photos than this are discarded as noise
+                (isolated snapshots, accidental captures). Set to 1 to keep
+                every single-photo trip.
+              </p>
+            </div>
+
+            <div className="trips-param-row">
+              <label className="trips-toggle-label">
+                <input
+                  type="checkbox"
+                  checked={enableGeocoding}
+                  onChange={(e) => { setEnableGeocoding(e.target.checked); lsSave("enable_geocoding", e.target.checked); }}
+                  className="trips-toggle-checkbox"
+                />
+                <span className="trips-param-label-text">Auto-geocode after grouping</span>
+              </label>
+              <p className="trips-param-hint">
+                When enabled, newly created trips are automatically renamed
+                to their location using Nominatim (requires internet access,
+                rate-limited to 1 request/s). Disable to skip naming — you
+                can always geocode individual trips manually later.
+              </p>
+            </div>
+          </div>
+
+          {/* ── Section: Home filtering ── */}
+          <div className="trips-settings-section">
+            <h4 className="trips-settings-section-title">Home filtering</h4>
+
+            {/* Home location */}
+            <div className="trips-param-row">
+              <div className="trips-param-label">
+                <span>Home location</span>
+                {homeLocation ? (
+                  <span className="trips-home-coords">
+                    {homeLocation.lat.toFixed(4)}°, {homeLocation.lon.toFixed(4)}°
+                  </span>
+                ) : (
+                  <span className="trips-home-unset">Not set — home filter inactive</span>
+                )}
+              </div>
+              <div className="trips-param-row-actions">
+                <button
+                  className="btn-outline"
+                  onClick={handleInferHome}
+                  disabled={inferringHome}
+                  title="Infer home location from the most-visited area in your library"
+                >
+                  {inferringHome ? "Inferring…" : homeLocation ? "Re-infer home" : "Infer home"}
+                </button>
+                <button
+                  className="btn-outline"
+                  onClick={() => {
+                    setShowManualHomeForm((v) => !v);
+                    setManualLat(homeLocation ? String(homeLocation.lat) : "");
+                    setManualLon(homeLocation ? String(homeLocation.lon) : "");
+                  }}
+                >
+                  {showManualHomeForm ? "Cancel" : "Set manually"}
+                </button>
+              </div>
+              {showManualHomeForm && (
+                <div className="trips-manual-home-form">
+                  <div className="trips-manual-home-inputs">
+                    <input
+                      type="number"
+                      placeholder="Latitude (−90 to 90)"
+                      value={manualLat}
+                      onChange={(e) => setManualLat(e.target.value)}
+                      step="any"
+                      min={-90}
+                      max={90}
+                      className="trips-coord-input"
+                    />
+                    <input
+                      type="number"
+                      placeholder="Longitude (−180 to 180)"
+                      value={manualLon}
+                      onChange={(e) => setManualLon(e.target.value)}
+                      step="any"
+                      min={-180}
+                      max={180}
+                      className="trips-coord-input"
+                    />
+                  </div>
+                  <div className="trips-manual-home-actions">
+                    <button
+                      className="btn-primary"
+                      onClick={handleSetManualHome}
+                      disabled={settingHome || !manualLat || !manualLon}
+                    >
+                      {settingHome ? "Saving…" : "Save"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Min distance from home slider */}
+            <div className="trips-param-row">
+              <div className="trips-param-label-row">
+                <label htmlFor="min-trip-km-slider" className="trips-param-label-text">
+                  Min distance from home
+                </label>
+                <span className="trips-param-value">
+                  {minTripKm === 0 ? "disabled" : `${minTripKm} km`}
+                </span>
+              </div>
+              <input
+                id="min-trip-km-slider"
+                type="range"
+                min={0}
+                max={300}
+                step={5}
+                value={minTripKm}
+                onChange={(e) => { const v = Number(e.target.value); setMinTripKm(v); lsSave("min_trip_km", v); }}
+                className="trips-range-slider"
+              />
+              <p className="trips-param-hint">
+                Clusters whose centroid is within this radius of home are
+                only kept when they pass the density test below. Set to 0
+                to disable all home-proximity filtering.
+              </p>
+            </div>
+
+            {/* Home density multiplier */}
+            <div className="trips-param-row">
+              <div className="trips-param-label-row">
+                <label htmlFor="home-density-slider" className="trips-param-label-text">
+                  Local-outing density multiplier
+                </label>
+                <span className="trips-param-value">
+                  {homeDensityMultiplier.toFixed(1)}×
+                </span>
+              </div>
+              <input
+                id="home-density-slider"
+                type="range"
+                min={1.0}
+                max={10.0}
+                step={0.5}
+                value={homeDensityMultiplier}
+                onChange={(e) => { const v = Number(e.target.value); setHomeDensityMultiplier(v); lsSave("home_density_multiplier", v); }}
+                className="trips-range-slider"
+              />
+              <p className="trips-param-hint">
+                Near-home clusters are kept as trips when their photo density
+                (photos/day) is at least this multiple above your library's
+                daily baseline. Raise to 5–8× to only capture very
+                photo-intensive local days (festivals, hikes); lower to 1.5×
+                to keep almost all local outings.
+              </p>
+            </div>
+          </div>
+
+          {/* ── Section: Home timeframes (move events) ── */}
+          <div className="trips-settings-section">
+            <h4 className="trips-settings-section-title">Home timeframes</h4>
+            <p className="trips-param-hint" style={{ marginBottom: "0.6rem" }}>
+              Track when your home location changed over time. Confirmed
+              transitions allow the algorithm to apply the correct home
+              filter for each era of your photo library.
+            </p>
+
+            {/* Move event detection */}
+            <div className="trips-param-row">
+              <div className="trips-param-label">
+                <span>Move events</span>
+                <span className="trips-home-coords">
+                  {transitions.filter((t) => t.is_confirmed).length} confirmed,{" "}
+                  {transitions.filter((t) => !t.is_confirmed).length} pending
+                </span>
+              </div>
+              <div className="trips-param-row-actions">
+                <button
+                  className="btn-outline"
+                  onClick={handleDetectMoves}
+                  disabled={detectingMoves}
+                  title="Analyse your photo timeline for sustained location changes"
+                >
+                  {detectingMoves ? "Detecting…" : "Detect moves"}
+                </button>
+                <button
+                  className="btn-outline"
+                  onClick={() => {
+                    setShowAddTransitionForm((v) => !v);
+                    setNewTransitionDate("");
+                    setNewTransitionLat("");
+                    setNewTransitionLon("");
+                  }}
+                >
+                  {showAddTransitionForm ? "Cancel" : "+ Add period"}
+                </button>
+                {transitions.length > 0 && (
+                  <button
+                    className="btn-outline"
+                    onClick={() => setShowMoveEvents((v) => !v)}
+                  >
+                    {showMoveEvents ? "Hide" : "Show"} move events
+                  </button>
+                )}
+              </div>
+              {showAddTransitionForm && (
+                <div className="trips-add-transition-form">
+                  <p className="trips-param-hint">
+                    Record when you moved to a new home location. The date and
+                    coordinates become a confirmed transition used by trip grouping.
+                  </p>
+                  <div className="trips-manual-home-inputs">
+                    <input
+                      type="date"
+                      value={newTransitionDate}
+                      onChange={(e) => setNewTransitionDate(e.target.value)}
+                      className="trips-date-input"
+                      aria-label="Date you moved to this location"
+                      title="Date you moved to this location"
+                    />
+                    <input
+                      type="number"
+                      placeholder="Latitude (−90 to 90)"
+                      value={newTransitionLat}
+                      onChange={(e) => setNewTransitionLat(e.target.value)}
+                      step="any"
+                      min={-90}
+                      max={90}
+                      className="trips-coord-input"
+                    />
+                    <input
+                      type="number"
+                      placeholder="Longitude (−180 to 180)"
+                      value={newTransitionLon}
+                      onChange={(e) => setNewTransitionLon(e.target.value)}
+                      step="any"
+                      min={-180}
+                      max={180}
+                      className="trips-coord-input"
+                    />
+                  </div>
+                  <div className="trips-manual-home-actions">
+                    <button
+                      className="btn-primary"
+                      onClick={handleAddTransition}
+                      disabled={
+                        addingTransition ||
+                        !newTransitionDate ||
+                        !newTransitionLat ||
+                        !newTransitionLon
+                      }
+                    >
+                      {addingTransition ? "Saving…" : "Save"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Move events list */}
+            {showMoveEvents && transitions.length > 0 && (
+              <div className="trips-move-events">
+                {transitions.map((t) => (
+                  <div key={t.id} className={`trips-move-event${t.is_confirmed ? " trips-move-event--confirmed" : ""}`}>
+                    <div className="trips-move-event-info">
+                      <span className="trips-move-event-date">
+                        {new Date(t.transition_ts * 1000).toLocaleDateString(undefined, {
+                          year: "numeric",
+                          month: "short",
+                          day: "numeric",
+                          timeZone: "UTC",
+                        })}
+                      </span>
+                      <span className="trips-move-event-location">
+                        {t.old_lat !== null
+                          ? `(${t.old_lat.toFixed(2)}°, ${t.old_lon!.toFixed(2)}°) →`
+                          : "Unknown →"}{" "}
+                        ({t.new_lat.toFixed(2)}°, {t.new_lon.toFixed(2)}°)
+                      </span>
+                      {t.is_confirmed && (
+                        <span className="trips-move-event-confirmed-badge">✓ Confirmed</span>
+                      )}
+                    </div>
+                    {!t.is_confirmed && (
+                      <div className="trips-move-event-actions">
+                        <button
+                          className="btn-outline"
+                          onClick={() => handleConfirmTransition(t.id)}
+                        >
+                          Confirm
+                        </button>
+                        <button
+                          className="btn-ghost"
+                          onClick={() => handleDismissTransition(t.id)}
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    )}
+                    {t.is_confirmed && (
+                      <div className="trips-move-event-actions">
+                        <button
+                          className="btn-ghost"
+                          onClick={() => handleDismissTransition(t.id)}
+                          title="Remove this home period"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {showMoveEvents && transitions.length === 0 && (
+              <p className="trips-empty">No move events detected.</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── New trip form ── */}
+      {showNewTripForm && (
+        <div className="trips-new-trip-form">
+          <input
+            className="trip-rename-input"
+            placeholder="Trip name…"
+            value={newTripName}
+            onChange={(e) => setNewTripName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void handleCreateTrip();
+              if (e.key === "Escape") {
+                setShowNewTripForm(false);
+                setNewTripName("");
+              }
+            }}
+            autoFocus
+            disabled={creatingTrip}
+          />
+          <button
+            className="btn-primary"
+            onClick={handleCreateTrip}
+            disabled={creatingTrip || !newTripName.trim()}
+          >
+            {creatingTrip ? "Creating…" : "Create"}
+          </button>
+        </div>
+      )}
+
+      {geocodingStatus && (
+        <p className="trips-hint trips-geocoding-status">{geocodingStatus}</p>
+      )}
+
+      {error && (
+        <p className="trips-error" role="alert">
+          {error}
+        </p>
+      )}
+
+      {/* ── Photo suggestions panel ── */}
+      {showSuggestions && (
+        <section className="trips-suggestions">
+          <h3 className="trips-section-title">
+            Photo suggestions
+            {suggestions.length > 0 && (
+              <span className="trips-section-count">{suggestions.length}</span>
+            )}
+          </h3>
+          {suggestions.length === 0 ? (
+            <p className="trips-hint">
+              No unassigned photos found that fall within existing confirmed trip
+              time windows.
+            </p>
+          ) : (
+            suggestions.map((s) => (
+              <div key={s.trip_id} className="trip-suggestion-card">
+                <div className="trip-suggestion-header">
+                  <span className="trip-suggestion-name">{s.trip_name}</span>
+                  <span className="trip-suggestion-count">
+                    {s.photos.length} unassigned photo
+                    {s.photos.length !== 1 ? "s" : ""} in this time window
+                  </span>
+                </div>
+                <div className="trip-suggestion-thumbs">
+                  {s.photos.slice(0, 6).map((p) => (
+                    <PhotoCard key={p.id} photo={p} />
+                  ))}
+                  {s.photos.length > 6 && (
+                    <span className="trip-suggestion-more">
+                      +{s.photos.length - 6} more
+                    </span>
+                  )}
+                </div>
+                <div className="trip-suggestion-actions">
+                  <button
+                    className="btn-primary"
+                    onClick={() =>
+                      handleAcceptSuggestion(
+                        s.trip_id,
+                        s.photos.map((p) => p.id)
+                      )
+                    }
+                  >
+                    Add all to "{s.trip_name}"
+                  </button>
+                  <button
+                    className="btn-ghost"
+                    onClick={() => handleDismissSuggestion(s.trip_id)}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </section>
+      )}
+
+      {!loading && trips.length === 0 && !error && (
+        <div className="trips-empty-state">
+          <p>No trips yet.</p>
+          <p className="trips-hint">
+            Click <strong>Auto-group trips</strong> to automatically cluster
+            your photos into trips based on the time gaps between them, or use{" "}
+            <strong>+ New trip</strong> to create one manually.
+          </p>
+        </div>
+      )}
+
+      {/* ── Suggested section ── */}
+      {suggested.length > 0 && (
+        <section className="trips-section">
+          <h3 className="trips-section-title">
+            Suggested
+            <span className="trips-section-count">{suggested.length}</span>
+            <button
+              className="btn-ghost trips-clear-all-btn"
+              onClick={handleClearAllSuggestions}
+              disabled={clearingAll}
+              title="Remove all suggestions"
+            >
+              {clearingAll ? "Clearing…" : "Clear all"}
+            </button>
+          </h3>
+          <div className="trip-list">
+            {suggested.map((trip) => (
+              <TripCard
+                key={trip.id}
+                trip={trip}
+                onSelect={setSelectedTrip}
+                onDismiss={handleDismissSuggestedTrip}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* ── Confirmed section ── */}
+      {confirmed.length > 0 && (
+        <section className="trips-section">
+          <h3 className="trips-section-title">
+            Confirmed
+            <span className="trips-section-count">{confirmed.length}</span>
+          </h3>
+          <div className="trip-list">
+            {confirmed.map((trip) => (
+              <TripCard key={trip.id} trip={trip} onSelect={setSelectedTrip} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {hasMore && (
+        <div className="trips-load-more">
+          <button
+            className="btn-outline"
+            onClick={() => loadPage(offset, trips)}
+            disabled={loading}
+          >
+            {loading ? "Loading…" : "Load more"}
+          </button>
+        </div>
+      )}
+      {loading && trips.length === 0 && (
+        <p className="trips-loading">Loading trips…</p>
+      )}
+
+      {/* ── Ungrouped photos (debug) ── */}
+      <section className="trips-section trips-section--ungrouped">
+        <h3 className="trips-section-title">
+          <button
+            className="btn-ghost trips-ungrouped-toggle"
+            onClick={handleToggleUngrouped}
+            aria-expanded={showUngrouped}
+          >
+            {showUngrouped ? "▾" : "▸"} Ungrouped photos
+          </button>
+          {ungroupedCount !== null && (
+            <span className="trips-section-count">{ungroupedCount}</span>
+          )}
+        </h3>
+        {showUngrouped && (
+          <>
+            {ungroupedLoading && ungroupedPhotos.length === 0 && (
+              <p className="trips-loading">Loading…</p>
+            )}
+            {!ungroupedLoading && ungroupedPhotos.length === 0 && (
+              <p className="trips-hint">No ungrouped photos — all photos belong to a trip.</p>
+            )}
+            {ungroupedPhotos.length > 0 && (
+              <div className="photo-grid trips-ungrouped-grid">
+                {ungroupedPhotos.map((p) => (
+                  <PhotoCard key={p.id} photo={p} />
+                ))}
+              </div>
+            )}
+            {ungroupedHasMore && (
+              <div className="trips-load-more">
+                <button
+                  className="btn-outline"
+                  onClick={() => loadUngroupedPage(ungroupedOffset, ungroupedPhotos)}
+                  disabled={ungroupedLoading}
+                >
+                  {ungroupedLoading ? "Loading…" : "Load more"}
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </section>
+    </div>
+  );
+}

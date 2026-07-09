@@ -1,0 +1,14 @@
+{
+    "identifier": "default",
+    "windows": [
+        "main"
+    ],
+    "permissions": [
+        "dialog:default",
+        "dialog:allow-save",
+        "core:path:allow-resolve-directory",
+        "core:path:default",
+        "core:event:default",
+        "core:event:allow-listen"
+    ]
+}
